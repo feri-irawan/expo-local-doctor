@@ -1,29 +1,50 @@
 #!/usr/bin/env bash
 # expo-local-doctor — Diagnose and fix your Expo local build environment on Linux.
-# https://github.com/user/expo-local-doctor
+# https://github.com/feri-irawan/expo-local-doctor
 #
 # Usage:
-#   expo-local-doctor          Check system readiness
-#   expo-local-doctor --fix    Auto-install missing dependencies
-#   expo-local-doctor --help   Show help
-#   expo-local-doctor --version Show version
+#   expo-local-doctor                Check system readiness
+#   expo-local-doctor --fix          Auto-install missing dependencies
+#   expo-local-doctor --sdk <ver>    Target a specific Expo SDK version
+#   expo-local-doctor --help         Show help
+#   expo-local-doctor --version      Show version
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION="1.0.0"
+VERSION="1.1.0"
 SCRIPT_NAME="expo-local-doctor"
 
-# Minimum required versions
-MIN_NODE_VERSION=18
-MIN_JDK_VERSION=17
-
-# Android SDK defaults (easy to bump)
+# Android command-line tools download version (latest stable)
 ANDROID_CMDLINE_TOOLS_VERSION="11076708"
-ANDROID_PLATFORM_VERSION="android-35"
-ANDROID_BUILD_TOOLS_VERSION="35.0.0"
+
+# ---------------------------------------------------------------------------
+# Expo SDK → Dependency version mapping table
+# Format: sdk_version|min_node|min_jdk|compile_sdk|build_tools
+# Source: https://docs.expo.dev/versions/latest/
+# ---------------------------------------------------------------------------
+SDK_VERSION_MAP=(
+    "56|22|17|36|36.0.0"
+    "55|20|17|36|36.0.0"
+    "54|20|17|36|36.0.0"
+    "53|18|17|35|35.0.0"
+    "52|18|17|35|35.0.0"
+    "51|18|17|34|34.0.0"
+    "50|18|17|34|34.0.0"
+)
+
+# Default fallback (latest known SDK)
+DEFAULT_SDK_VERSION=56
+
+# These will be set by resolve_sdk_versions()
+MIN_NODE_VERSION=""
+MIN_JDK_VERSION=""
+ANDROID_PLATFORM_VERSION=""
+ANDROID_BUILD_TOOLS_VERSION=""
+DETECTED_SDK_VERSION=""
+SDK_SOURCE=""
 
 # ---------------------------------------------------------------------------
 # Color support (auto-detect TTY)
@@ -56,6 +77,7 @@ divider() { echo -e "${DIM}─────────────────�
 # ---------------------------------------------------------------------------
 MISSING=0
 FIX_MODE=0
+USER_SDK_OVERRIDE=""
 CHECKS_PASSED=0
 CHECKS_WARNED=0
 CHECKS_FAILED=0
@@ -67,14 +89,107 @@ detect_arch() {
     local machine
     machine=$(uname -m)
     case "$machine" in
-        x86_64)       ARCH="x86_64";  JDK_ARCH="amd64"   ;;
-        aarch64|arm64) ARCH="aarch64"; JDK_ARCH="arm64"   ;;
-        armv7l)        ARCH="armv7l";  JDK_ARCH="armhf"   ;;
+        x86_64)        ARCH="x86_64"  ;;
+        aarch64|arm64) ARCH="aarch64" ;;
+        armv7l)        ARCH="armv7l"  ;;
         *)
             warn "Unknown architecture: $machine. Defaulting to x86_64."
-            ARCH="x86_64"; JDK_ARCH="amd64"
+            ARCH="x86_64"
             ;;
     esac
+}
+
+# ---------------------------------------------------------------------------
+# Expo SDK detection
+# ---------------------------------------------------------------------------
+
+# Look up version requirements for a given SDK version.
+# Sets: MIN_NODE_VERSION, MIN_JDK_VERSION, ANDROID_PLATFORM_VERSION, ANDROID_BUILD_TOOLS_VERSION
+resolve_sdk_versions() {
+    local sdk="$1"
+    local entry entry_sdk min_node min_jdk compile_sdk build_tools
+    for entry in "${SDK_VERSION_MAP[@]}"; do
+        IFS='|' read -r entry_sdk min_node min_jdk compile_sdk build_tools <<< "$entry"
+        if [ "$entry_sdk" = "$sdk" ]; then
+            MIN_NODE_VERSION="$min_node"
+            MIN_JDK_VERSION="$min_jdk"
+            ANDROID_PLATFORM_VERSION="android-${compile_sdk}"
+            ANDROID_BUILD_TOOLS_VERSION="$build_tools"
+            DETECTED_SDK_VERSION="$sdk"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Detected project package manager (npm, yarn, pnpm, bun, or empty string)
+PROJECT_PKG_MANAGER=""
+
+# Detect the Expo SDK version and the project's package manager in a single
+# walk up from $PWD. The first package.json with a usable "expo" dependency
+# sets the SDK; the first one with a packageManager field or adjacent lock file
+# sets the package manager. Falls back to the latest known SDK if none found.
+detect_project() {
+    # --sdk override short-circuits SDK detection (the PM is still scanned for)
+    local sdk_resolved=0
+    if [ -n "$USER_SDK_OVERRIDE" ]; then
+        if resolve_sdk_versions "$USER_SDK_OVERRIDE"; then
+            SDK_SOURCE="--sdk flag"
+        else
+            warn "Unknown SDK version: $USER_SDK_OVERRIDE. Using latest defaults (SDK $DEFAULT_SDK_VERSION)."
+            resolve_sdk_versions "$DEFAULT_SDK_VERSION"
+            SDK_SOURCE="latest defaults (unknown --sdk)"
+        fi
+        sdk_resolved=1
+    fi
+
+    local dir="$PWD"
+    while [ "$dir" != "/" ]; do
+        if [ -f "$dir/package.json" ]; then
+            # Expo SDK version: "expo": "~XX.Y.Z" | "^XX.Y.Z" | "XX.Y.Z"
+            if [ "$sdk_resolved" -eq 0 ]; then
+                local expo_ver
+                # `|| true`: grep returns non-zero on no match, which would trip set -e/pipefail
+                expo_ver=$(grep -oP '"expo"\s*:\s*"[~^]?\K\d+' "$dir/package.json" 2>/dev/null | head -1 || true)
+                if [ -n "$expo_ver" ]; then
+                    if resolve_sdk_versions "$expo_ver"; then
+                        SDK_SOURCE="$dir/package.json"
+                        sdk_resolved=1
+                    else
+                        warn "Expo SDK $expo_ver found in $dir/package.json but not in version map."
+                    fi
+                fi
+            fi
+
+            # Package manager: packageManager field, else nearest lock file
+            if [ -z "$PROJECT_PKG_MANAGER" ]; then
+                local pm_field
+                pm_field=$(grep -oP '"packageManager"\s*:\s*"\K[^@"]+' "$dir/package.json" 2>/dev/null | head -1 || true)
+                if [ -n "$pm_field" ]; then
+                    PROJECT_PKG_MANAGER="$pm_field"
+                elif [ -f "$dir/bun.lockb" ] || [ -f "$dir/bun.lock" ]; then
+                    PROJECT_PKG_MANAGER="bun"
+                elif [ -f "$dir/pnpm-lock.yaml" ]; then
+                    PROJECT_PKG_MANAGER="pnpm"
+                elif [ -f "$dir/yarn.lock" ]; then
+                    PROJECT_PKG_MANAGER="yarn"
+                elif [ -f "$dir/package-lock.json" ]; then
+                    PROJECT_PKG_MANAGER="npm"
+                fi
+            fi
+        fi
+
+        # Stop early once both are known
+        [ "$sdk_resolved" -eq 1 ] && [ -n "$PROJECT_PKG_MANAGER" ] && break
+
+        dir=$(dirname "$dir")
+    done
+
+    # Fallback to latest known defaults if no project SDK was detected
+    if [ "$sdk_resolved" -eq 0 ]; then
+        resolve_sdk_versions "$DEFAULT_SDK_VERSION"
+        SDK_SOURCE="latest defaults (no project detected)"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -192,7 +307,7 @@ check_basic_utils() {
 }
 
 check_node() {
-    header "🟢 Node.js & Ecosystem"
+    header "🟢 Node.js & Package Managers"
 
     if ! command -v node &>/dev/null; then
         fail "Node.js is not installed."
@@ -201,9 +316,10 @@ check_node() {
     else
         local node_version
         node_version=$(node -v | sed 's/^v//' | cut -d'.' -f1)
-        if [ "$node_version" -lt "$MIN_NODE_VERSION" ]; then
-            warn "Node.js v$node_version is installed, but v${MIN_NODE_VERSION}+ (LTS) is recommended."
-            ((CHECKS_WARNED++)) || true
+        if [ -n "$node_version" ] && [ "$node_version" -lt "$MIN_NODE_VERSION" ]; then
+            fail "Node.js v$node_version is installed, but v${MIN_NODE_VERSION}+ is required for Expo SDK ${DETECTED_SDK_VERSION}."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
         else
             ok "Node.js is installed: ${DIM}$(node -v)${RESET}"
             ((CHECKS_PASSED++)) || true
@@ -211,6 +327,18 @@ check_node() {
     fi
 
     check_cmd npm || true
+
+    # Check the project's package manager if it differs from npm
+    if [ -n "$PROJECT_PKG_MANAGER" ] && [ "$PROJECT_PKG_MANAGER" != "npm" ]; then
+        if command -v "$PROJECT_PKG_MANAGER" &>/dev/null; then
+            ok "$PROJECT_PKG_MANAGER is installed: ${DIM}$(command -v "$PROJECT_PKG_MANAGER")${RESET}"
+            ((CHECKS_PASSED++)) || true
+        else
+            fail "$PROJECT_PKG_MANAGER is required by this project but not installed."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        fi
+    fi
 }
 
 check_eas() {
@@ -229,10 +357,11 @@ check_java() {
         ((CHECKS_FAILED++)) || true
     else
         local java_version
-        java_version=$(java -version 2>&1 | head -n1 | grep -oP '(?<=\")\d+' | head -1)
+        java_version=$(java -version 2>&1 | head -n1 | grep -oP '(?<=\")\d+' | head -1 || true)
         if [ -n "$java_version" ] && [ "$java_version" -lt "$MIN_JDK_VERSION" ]; then
-            warn "Java $java_version is installed, but version ${MIN_JDK_VERSION}+ is required."
-            ((CHECKS_WARNED++)) || true
+            fail "Java $java_version is installed, but version ${MIN_JDK_VERSION}+ is required."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
         else
             ok "Java is installed: ${DIM}version ${java_version:-unknown}${RESET}"
             ((CHECKS_PASSED++)) || true
@@ -243,21 +372,19 @@ check_java() {
 }
 
 check_android_sdk() {
-    header "🤖 Android SDK"
+    header "🤖 Android SDK (${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION})"
 
     check_env_dir ANDROID_HOME || true
 
     local sdk_dir="${ANDROID_HOME:-}"
     if [ -n "$sdk_dir" ] && [ -d "$sdk_dir" ]; then
-        local sdk_ok=1
-
         if [ -d "$sdk_dir/cmdline-tools" ]; then
             ok "cmdline-tools directory found."
             ((CHECKS_PASSED++)) || true
         else
             fail "cmdline-tools directory is missing."
+            MISSING=1
             ((CHECKS_FAILED++)) || true
-            sdk_ok=0
         fi
 
         if [ -d "$sdk_dir/platform-tools" ]; then
@@ -265,30 +392,46 @@ check_android_sdk() {
             ((CHECKS_PASSED++)) || true
         else
             fail "platform-tools directory is missing."
+            MISSING=1
             ((CHECKS_FAILED++)) || true
-            sdk_ok=0
         fi
 
-        if [ -d "$sdk_dir/build-tools" ]; then
-            ok "build-tools directory found."
+        if [ -d "$sdk_dir/build-tools/${ANDROID_BUILD_TOOLS_VERSION}" ]; then
+            ok "build-tools ${ANDROID_BUILD_TOOLS_VERSION} found."
             ((CHECKS_PASSED++)) || true
+        elif [ -d "$sdk_dir/build-tools" ] && ls "$sdk_dir/build-tools/" &>/dev/null 2>&1; then
+            local installed_bt
+            installed_bt=$(ls "$sdk_dir/build-tools/" | head -1)
+            fail "build-tools ${installed_bt} found, but ${ANDROID_BUILD_TOOLS_VERSION} is required for SDK ${DETECTED_SDK_VERSION}."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
         else
             fail "build-tools directory is missing."
+            MISSING=1
             ((CHECKS_FAILED++)) || true
-            sdk_ok=0
         fi
 
-        if ls "$sdk_dir/platforms/"android-* &>/dev/null 2>&1; then
-            ok "Android platform(s) found."
+        if [ -d "$sdk_dir/platforms/${ANDROID_PLATFORM_VERSION}" ]; then
+            ok "${ANDROID_PLATFORM_VERSION} platform found."
+            ((CHECKS_PASSED++)) || true
+        elif ls "$sdk_dir/platforms/"android-* &>/dev/null 2>&1; then
+            local installed_plat
+            installed_plat=$(ls "$sdk_dir/platforms/" | tail -1)
+            fail "Platform ${installed_plat} found, but ${ANDROID_PLATFORM_VERSION} is required for SDK ${DETECTED_SDK_VERSION}."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        else
+            fail "No Android platforms installed (need ${ANDROID_PLATFORM_VERSION})."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        fi
+
+        if command -v adb &>/dev/null; then
+            ok "adb is in PATH: ${DIM}$(command -v adb)${RESET}"
             ((CHECKS_PASSED++)) || true
         else
-            fail "No Android platforms installed."
-            ((CHECKS_FAILED++)) || true
-            sdk_ok=0
-        fi
-
-        if [ "$sdk_ok" -eq 0 ]; then
-            MISSING=1
+            warn "adb is not in PATH. Add ${BOLD}\$ANDROID_HOME/platform-tools${RESET} to your PATH."
+            ((CHECKS_WARNED++)) || true
         fi
     fi
 }
@@ -324,7 +467,7 @@ fix_node() {
     if command -v node &>/dev/null; then
         local node_version
         node_version=$(node -v | sed 's/^v//' | cut -d'.' -f1)
-        if [ "$node_version" -ge "$MIN_NODE_VERSION" ]; then
+        if [ -n "$node_version" ] && [ "$node_version" -ge "$MIN_NODE_VERSION" ]; then
             ok "Node.js $(node -v) is already installed."
             return
         fi
@@ -338,11 +481,47 @@ fix_node() {
     # shellcheck source=/dev/null
     [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
 
-    nvm install --lts
-    nvm use --lts
-    nvm alias default 'lts/*'
+    nvm install "$MIN_NODE_VERSION"
+    nvm use "$MIN_NODE_VERSION"
+    nvm alias default "$MIN_NODE_VERSION"
 
     ok "Node.js $(node -v) installed via NVM."
+}
+
+fix_pkg_manager() {
+    if [ -z "$PROJECT_PKG_MANAGER" ] || [ "$PROJECT_PKG_MANAGER" = "npm" ]; then
+        return
+    fi
+
+    case "$PROJECT_PKG_MANAGER" in
+        yarn)
+            if ! command -v yarn &>/dev/null; then
+                header "🧶 Installing Yarn..."
+                npm install -g yarn
+                ok "Yarn installed."
+            else
+                ok "Yarn is already installed."
+            fi
+            ;;
+        pnpm)
+            if ! command -v pnpm &>/dev/null; then
+                header "📦 Installing pnpm..."
+                npm install -g pnpm
+                ok "pnpm installed."
+            else
+                ok "pnpm is already installed."
+            fi
+            ;;
+        bun)
+            if ! command -v bun &>/dev/null; then
+                header "🍞 Installing Bun..."
+                curl -fsSL https://bun.sh/install | bash
+                ok "Bun installed."
+            else
+                ok "Bun is already installed."
+            fi
+            ;;
+    esac
 }
 
 fix_eas() {
@@ -357,30 +536,33 @@ fix_eas() {
 }
 
 fix_java() {
-    if command -v java &>/dev/null; then
-        ok "Java is already installed."
+    local needs_install=0
+    if ! command -v java &>/dev/null; then
+        needs_install=1
     else
+        local java_version
+        java_version=$(java -version 2>&1 | head -n1 | grep -oP '(?<=")\d+' | head -1 || true)
+        if [ -n "$java_version" ] && [ "$java_version" -lt "$MIN_JDK_VERSION" ]; then
+            info "Java $java_version is installed but version ${MIN_JDK_VERSION} is required. Installing..."
+            needs_install=1
+        else
+            ok "Java is already installed: ${DIM}version ${java_version:-unknown}${RESET}"
+        fi
+    fi
+
+    if [ "$needs_install" -eq 1 ]; then
         header "☕ Installing OpenJDK ${MIN_JDK_VERSION}..."
         install_pkg "openjdk-${MIN_JDK_VERSION}-jdk" "java-${MIN_JDK_VERSION}-openjdk-devel" "jdk${MIN_JDK_VERSION}-openjdk"
         ok "OpenJDK ${MIN_JDK_VERSION} installed."
     fi
 
+    # Resolve the JDK home from the active java binary
+    local java_home_path
+    java_home_path=$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")
+
     # Set JAVA_HOME if not already configured
     if ! grep -q "JAVA_HOME" ~/.bashrc 2>/dev/null; then
         header "☕ Configuring JAVA_HOME..."
-
-        local java_home_path=""
-        case "$PKG_MANAGER" in
-            apt)
-                java_home_path="/usr/lib/jvm/java-${MIN_JDK_VERSION}-openjdk-${JDK_ARCH}"
-                ;;
-            dnf)
-                java_home_path="/usr/lib/jvm/java-${MIN_JDK_VERSION}-openjdk"
-                ;;
-            pacman)
-                java_home_path="/usr/lib/jvm/java-${MIN_JDK_VERSION}-openjdk"
-                ;;
-        esac
 
         if [ -n "$java_home_path" ]; then
             echo "export JAVA_HOME=${java_home_path}" >> ~/.bashrc
@@ -388,19 +570,88 @@ fix_java() {
             ok "JAVA_HOME set to ${java_home_path}"
         fi
     else
-        ok "JAVA_HOME is already configured in ~/.bashrc"
+        # JAVA_HOME is present — make sure it isn't stale (e.g. after a JDK upgrade)
+        local configured_home
+        configured_home=$(grep -oP 'JAVA_HOME=\K[^\s"]+' ~/.bashrc 2>/dev/null | tail -1 || true)
+        if [ -n "$configured_home" ] && [ ! -d "$configured_home" ]; then
+            warn "JAVA_HOME in ~/.bashrc points to ${configured_home}, which no longer exists."
+            [ -n "$java_home_path" ] && info "Update it to: ${BOLD}export JAVA_HOME=${java_home_path}${RESET}"
+        else
+            ok "JAVA_HOME is already configured in ~/.bashrc"
+        fi
     fi
 }
 
+# Locate the cmdline-tools bin directory that contains sdkmanager.
+# Prefers the 'latest' channel, falls back to any versioned install.
+# Echoes the bin directory on success; returns non-zero if none found.
+find_cmdline_tools_bin() {
+    local sdk_root="$1" candidate
+    if [ -x "$sdk_root/cmdline-tools/latest/bin/sdkmanager" ]; then
+        echo "$sdk_root/cmdline-tools/latest/bin"
+        return 0
+    fi
+    for candidate in "$sdk_root"/cmdline-tools/*/bin; do
+        if [ -x "$candidate/sdkmanager" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 fix_android_sdk() {
+    local sdk_dir="${ANDROID_HOME:-$HOME/Android/Sdk}"
+
     if [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/cmdline-tools" ]; then
-        ok "Android SDK is already configured."
+        # SDK exists — check whether the required platform and build-tools are present
+        local needs_update=0
+        if [ ! -d "${ANDROID_HOME}/platforms/${ANDROID_PLATFORM_VERSION}" ]; then
+            info "Missing ${ANDROID_PLATFORM_VERSION} — will install."
+            needs_update=1
+        fi
+        if [ ! -d "${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}" ]; then
+            info "Missing build-tools ${ANDROID_BUILD_TOOLS_VERSION} — will install."
+            needs_update=1
+        fi
+
+        if [ "$needs_update" -eq 0 ]; then
+            ok "Android SDK is already configured with ${ANDROID_PLATFORM_VERSION} and build-tools ${ANDROID_BUILD_TOOLS_VERSION}."
+            return
+        fi
+
+        header "🤖 Updating Android SDK for SDK ${DETECTED_SDK_VERSION}..."
+        export ANDROID_HOME="$sdk_dir"
+
+        # Locate sdkmanager (handles installs that don't use the 'latest' channel)
+        local cmdline_bin
+        if ! cmdline_bin=$(find_cmdline_tools_bin "$sdk_dir"); then
+            fail "sdkmanager not found under ${sdk_dir}/cmdline-tools."
+            info "Reinstall the Android command-line tools, or unset ANDROID_HOME to let this script set them up."
+            exit 1
+        fi
+        export PATH="$PATH:$ANDROID_HOME/emulator:$cmdline_bin:$ANDROID_HOME/platform-tools"
+
+        if ! grep -q "ANDROID_HOME" ~/.bashrc 2>/dev/null; then
+            {
+                echo "export ANDROID_HOME=${sdk_dir}"
+                echo 'export PATH=$PATH:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools'
+            } >> ~/.bashrc
+            ok "ANDROID_HOME PATH entries added to ~/.bashrc"
+        fi
+
+        info "Accepting Android SDK licenses..."
+        yes | sdkmanager --licenses 2>/dev/null || true
+
+        info "Installing ${ANDROID_PLATFORM_VERSION} and build-tools ${ANDROID_BUILD_TOOLS_VERSION}..."
+        sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM_VERSION}" "build-tools;${ANDROID_BUILD_TOOLS_VERSION}"
+
+        ok "Android SDK updated at ${sdk_dir}"
         return
     fi
 
     header "🤖 Installing Android SDK..."
 
-    local sdk_dir="${ANDROID_HOME:-$HOME/Android/Sdk}"
     mkdir -p "$sdk_dir/cmdline-tools"
 
     local tools_url="https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip"
@@ -433,7 +684,7 @@ fix_android_sdk() {
     info "Accepting Android SDK licenses..."
     yes | sdkmanager --licenses 2>/dev/null || true
 
-    info "Installing platform-tools, platform, and build-tools..."
+    info "Installing platform-tools, ${ANDROID_PLATFORM_VERSION}, and build-tools ${ANDROID_BUILD_TOOLS_VERSION}..."
     sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM_VERSION}" "build-tools;${ANDROID_BUILD_TOOLS_VERSION}"
 
     ok "Android SDK installed at ${sdk_dir}"
@@ -502,21 +753,31 @@ ${BOLD}$SCRIPT_NAME${RESET} v$VERSION
 Diagnose and fix your Expo/React Native local build environment on Linux.
 
 ${BOLD}USAGE${RESET}
-    $SCRIPT_NAME              Run diagnostics (check mode)
-    $SCRIPT_NAME --fix        Auto-install missing dependencies
-    $SCRIPT_NAME --help       Show this help message
-    $SCRIPT_NAME --version    Show version
+    $SCRIPT_NAME                   Run diagnostics (check mode)
+    $SCRIPT_NAME --fix             Auto-install missing dependencies
+    $SCRIPT_NAME --sdk <version>   Target a specific Expo SDK version
+    $SCRIPT_NAME --help            Show this help message
+    $SCRIPT_NAME --version         Show version
+
+${BOLD}SDK DETECTION${RESET}
+    By default, the tool detects your Expo SDK version from the nearest
+    package.json. Use --sdk to override, e.g. for checking before creating
+    a project.
 
 ${BOLD}WHAT GETS CHECKED${RESET}
     • Basic utilities    curl, git, unzip, wget, gcc, make
-    • Node.js            v${MIN_NODE_VERSION}+ (via NVM)
-    • npm                Package manager
+    • Node.js            Version based on Expo SDK requirements
+    • npm                Package manager (always required)
+    • yarn/pnpm/bun      Checked if detected as the project's package manager
     • EAS CLI            Expo Application Services
-    • Java JDK           OpenJDK ${MIN_JDK_VERSION}+
+    • Java JDK           OpenJDK (version based on Expo SDK)
     • JAVA_HOME          Environment variable
     • Android SDK        ANDROID_HOME, cmdline-tools, platform-tools,
-                         build-tools, platforms
+                         build-tools, platforms (versions per SDK)
     • Watchman           Optional, recommended for Metro
+
+${BOLD}SUPPORTED SDKs${RESET}
+    50, 51, 52, 53, 54, 55, 56
 
 ${BOLD}SUPPORTED DISTROS${RESET}
     • Debian / Ubuntu        (apt)
@@ -524,11 +785,17 @@ ${BOLD}SUPPORTED DISTROS${RESET}
     • Arch Linux             (pacman)
 
 ${BOLD}EXAMPLES${RESET}
-    # Check your system
+    # Check your system (auto-detect SDK from project)
     ./expo-local-doctor
+
+    # Check for a specific Expo SDK version
+    ./expo-local-doctor --sdk 55
 
     # Auto-fix everything
     ./expo-local-doctor --fix
+
+    # Auto-fix for a specific SDK version
+    ./expo-local-doctor --fix --sdk 56
 
     # Pipe-safe (colors auto-disabled)
     ./expo-local-doctor 2>&1 | tee doctor-report.txt
@@ -549,32 +816,50 @@ error_handler() {
 # Main
 # ---------------------------------------------------------------------------
 main() {
-    # Parse arguments
-    case "${1:-}" in
-        --help|-h)
-            show_help
-            exit 0
-            ;;
-        --version|-v)
-            echo "$SCRIPT_NAME v$VERSION"
-            exit 0
-            ;;
-        --fix|-f)
-            FIX_MODE=1
-            ;;
-        "")
-            FIX_MODE=0
-            ;;
-        *)
-            fail "Unknown option: $1"
-            info "Run ${BOLD}$SCRIPT_NAME --help${RESET} for usage."
-            exit 1
-            ;;
-    esac
+    # Parse arguments (supports combining --fix and --sdk in any order)
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --version|-v)
+                echo "$SCRIPT_NAME v$VERSION"
+                exit 0
+                ;;
+            --fix|-f)
+                FIX_MODE=1
+                ;;
+            --sdk)
+                if [ -z "${2:-}" ] || [[ "$2" == -* ]]; then
+                    fail "--sdk requires a version number (e.g., --sdk 56)"
+                    exit 1
+                fi
+                USER_SDK_OVERRIDE="$2"
+                shift
+                ;;
+            --sdk=*)
+                USER_SDK_OVERRIDE="${1#--sdk=}"
+                if [ -z "$USER_SDK_OVERRIDE" ]; then
+                    fail "--sdk requires a version number (e.g., --sdk=56)"
+                    exit 1
+                fi
+                ;;
+            *)
+                fail "Unknown option: $1"
+                info "Run ${BOLD}$SCRIPT_NAME --help${RESET} for usage."
+                exit 1
+                ;;
+        esac
+        shift
+    done
 
     # Detect system
     detect_arch
     detect_pkg_manager
+
+    # Detect Expo SDK and project package manager (single directory walk)
+    detect_project
 
     if [ "$FIX_MODE" -eq 1 ]; then
         # ── Fix Mode ──────────────────────────────────────────────
@@ -582,11 +867,15 @@ main() {
 
         echo -e "${BOLD}${CYAN}🛠️  $SCRIPT_NAME v$VERSION — Fix Mode${RESET}"
         info "Detected: ${BOLD}$PKG_MANAGER${RESET} on ${BOLD}$ARCH${RESET}"
+        info "Expo SDK: ${BOLD}$DETECTED_SDK_VERSION${RESET} ${DIM}($SDK_SOURCE)${RESET}"
+        info "Requirements: ${BOLD}Node ≥${MIN_NODE_VERSION}, JDK ${MIN_JDK_VERSION}, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}${RESET}"
+        [ -n "$PROJECT_PKG_MANAGER" ] && info "Package manager: ${BOLD}$PROJECT_PKG_MANAGER${RESET} ${DIM}(detected from project)${RESET}"
         divider
 
         update_pkg_cache
         fix_basic_utils
         fix_node
+        fix_pkg_manager
         fix_eas
         fix_java
         fix_android_sdk
@@ -602,6 +891,9 @@ main() {
         # ── Check Mode ────────────────────────────────────────────
         echo -e "${BOLD}${CYAN}🔍 $SCRIPT_NAME v$VERSION — Checking system readiness...${RESET}"
         info "Detected: ${BOLD}$PKG_MANAGER${RESET} on ${BOLD}$ARCH${RESET}"
+        info "Expo SDK: ${BOLD}$DETECTED_SDK_VERSION${RESET} ${DIM}($SDK_SOURCE)${RESET}"
+        info "Requirements: ${BOLD}Node ≥${MIN_NODE_VERSION}, JDK ${MIN_JDK_VERSION}, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}${RESET}"
+        [ -n "$PROJECT_PKG_MANAGER" ] && info "Package manager: ${BOLD}$PROJECT_PKG_MANAGER${RESET} ${DIM}(detected from project)${RESET}"
         divider
 
         check_basic_utils

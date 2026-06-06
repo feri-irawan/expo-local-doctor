@@ -14,6 +14,8 @@ Setting up a local Expo build environment on Linux can be tedious — you need N
 
 - 🔍 **One-command diagnostics** — instantly see what's missing or misconfigured
 - 🛠️ **Auto-fix mode** — install all missing dependencies with `--fix`
+- 🎯 **SDK-aware** — auto-detects your Expo SDK version from `package.json` and checks the correct requirements
+- 📦 **PM-aware** — detects your project's package manager (yarn, pnpm, bun) and checks it's installed
 - 🐧 **Multi-distro support** — works on Debian/Ubuntu, Fedora/RHEL, and Arch Linux
 - 🏗️ **Architecture-aware** — handles x86_64, aarch64, and armv7l
 - 🎨 **Colored output** — beautiful terminal output with auto-detection for piped/redirected output
@@ -53,14 +55,18 @@ chmod +x expo-local-doctor
 
 ### Check your system (default)
 
+Run inside your Expo project directory — it auto-detects the SDK version:
+
 ```bash
 ./expo-local-doctor
 ```
 
 **Example output:**
 ```
-🔍 expo-local-doctor v1.0.0 — Checking system readiness...
+🔍 expo-local-doctor v1.1.0 — Checking system readiness...
 ℹ  Detected: apt on x86_64
+ℹ  Expo SDK: 56 (from ./package.json)
+ℹ  Requirements: Node ≥22, JDK 17, android-36, build-tools 36.0.0
 ────────────────────────────────────────────────────────
 
 📦 Basic Utilities & Build Tools
@@ -70,8 +76,8 @@ chmod +x expo-local-doctor
 ✅ wget is installed: /usr/bin/wget
 ✅ Build essentials (gcc, make) are installed.
 
-🟢 Node.js & Ecosystem
-✅ Node.js is installed: v20.11.0
+🟢 Node.js & Package Managers
+✅ Node.js is installed: v22.13.0
 ✅ npm is installed: /usr/bin/npm
 
 ⚙️  EAS CLI
@@ -81,12 +87,12 @@ chmod +x expo-local-doctor
 ✅ Java is installed: version 17
 ✅ JAVA_HOME is set: /usr/lib/jvm/java-17-openjdk-amd64
 
-🤖 Android SDK
+🤖 Android SDK (android-36, build-tools 36.0.0)
 ✅ ANDROID_HOME is set: /home/user/Android/Sdk
 ✅ cmdline-tools directory found.
 ✅ platform-tools directory found.
-✅ build-tools directory found.
-✅ Android platform(s) found.
+✅ build-tools 36.0.0 found.
+✅ android-36 platform found.
 
 👀 Watchman
 ✅ Watchman is installed.
@@ -107,6 +113,16 @@ chmod +x expo-local-doctor
 ./expo-local-doctor --fix
 ```
 
+### Target a specific SDK version
+
+```bash
+# Check against SDK 55 requirements (even without a project)
+./expo-local-doctor --sdk 55
+
+# Auto-fix for a specific SDK
+./expo-local-doctor --fix --sdk 56
+```
+
 ### Other options
 
 ```bash
@@ -121,13 +137,17 @@ chmod +x expo-local-doctor
 | Component | Details |
 |---|---|
 | **Basic Utilities** | `curl`, `git`, `unzip`, `wget`, `gcc`, `make` |
-| **Node.js** | Version 18+ (LTS recommended) |
-| **npm** | Node package manager |
+| **Node.js** | Version per Expo SDK (e.g., ≥22 for SDK 56, ≥20 for SDK 54–55) |
+| **npm** | Always required |
+| **yarn / pnpm / bun** | Checked if detected as the project's package manager (via `packageManager` field or lock file) |
 | **EAS CLI** | Expo Application Services CLI |
 | **Java JDK** | OpenJDK 17+ |
 | **JAVA_HOME** | Environment variable pointing to JDK |
-| **Android SDK** | `ANDROID_HOME`, `cmdline-tools`, `platform-tools`, `build-tools`, platforms |
+| **Android SDK** | `ANDROID_HOME`, `cmdline-tools`, `platform-tools`, exact `build-tools` and platform per SDK |
+| **adb in PATH** | Warns if `$ANDROID_HOME/platform-tools` is not on `$PATH` |
 | **Watchman** | Optional, recommended for Metro bundler performance |
+
+> Version requirements are sourced from the [Expo SDK documentation](https://docs.expo.dev/versions/latest/) and automatically matched to your project.
 
 ---
 
@@ -165,6 +185,14 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 3. Commit your changes (`git commit -m 'feat: add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
+
+### Supporting a new Expo SDK
+
+The per-SDK requirements live in the `SDK_VERSION_MAP` table near the top of the
+`expo-local-doctor` script. Each row is `sdk|min_node|min_jdk|compile_sdk|build_tools`.
+To add a new SDK, append a row (cross-checked against the
+[Expo SDK docs](https://docs.expo.dev/versions/latest/)) and bump
+`DEFAULT_SDK_VERSION` to the newest entry.
 
 ---
 

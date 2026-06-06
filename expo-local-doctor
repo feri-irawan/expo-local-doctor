@@ -1,0 +1,617 @@
+#!/usr/bin/env bash
+# expo-local-doctor — Diagnose and fix your Expo local build environment on Linux.
+# https://github.com/user/expo-local-doctor
+#
+# Usage:
+#   expo-local-doctor          Check system readiness
+#   expo-local-doctor --fix    Auto-install missing dependencies
+#   expo-local-doctor --help   Show help
+#   expo-local-doctor --version Show version
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+VERSION="1.0.0"
+SCRIPT_NAME="expo-local-doctor"
+
+# Minimum required versions
+MIN_NODE_VERSION=18
+MIN_JDK_VERSION=17
+
+# Android SDK defaults (easy to bump)
+ANDROID_CMDLINE_TOOLS_VERSION="11076708"
+ANDROID_PLATFORM_VERSION="android-35"
+ANDROID_BUILD_TOOLS_VERSION="35.0.0"
+
+# ---------------------------------------------------------------------------
+# Color support (auto-detect TTY)
+# ---------------------------------------------------------------------------
+if [ -t 1 ] && [ -t 2 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    RESET='\033[0m'
+else
+    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' DIM='' RESET=''
+fi
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+info()    { echo -e "${BLUE}ℹ${RESET}  $*"; }
+ok()      { echo -e "${GREEN}✅${RESET} $*"; }
+warn()    { echo -e "${YELLOW}⚠️${RESET}  $*"; }
+fail()    { echo -e "${RED}❌${RESET} $*"; }
+header()  { echo -e "\n${BOLD}${CYAN}$*${RESET}"; }
+divider() { echo -e "${DIM}────────────────────────────────────────────────────────${RESET}"; }
+
+# ---------------------------------------------------------------------------
+# State
+# ---------------------------------------------------------------------------
+MISSING=0
+FIX_MODE=0
+CHECKS_PASSED=0
+CHECKS_WARNED=0
+CHECKS_FAILED=0
+
+# ---------------------------------------------------------------------------
+# Architecture detection
+# ---------------------------------------------------------------------------
+detect_arch() {
+    local machine
+    machine=$(uname -m)
+    case "$machine" in
+        x86_64)       ARCH="x86_64";  JDK_ARCH="amd64"   ;;
+        aarch64|arm64) ARCH="aarch64"; JDK_ARCH="arm64"   ;;
+        armv7l)        ARCH="armv7l";  JDK_ARCH="armhf"   ;;
+        *)
+            warn "Unknown architecture: $machine. Defaulting to x86_64."
+            ARCH="x86_64"; JDK_ARCH="amd64"
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Package manager detection
+# ---------------------------------------------------------------------------
+PKG_MANAGER=""
+
+detect_pkg_manager() {
+    if command -v apt-get &>/dev/null; then
+        PKG_MANAGER="apt"
+    elif command -v dnf &>/dev/null; then
+        PKG_MANAGER="dnf"
+    elif command -v pacman &>/dev/null; then
+        PKG_MANAGER="pacman"
+    else
+        fail "No supported package manager found (apt, dnf, pacman)."
+        fail "Please install dependencies manually."
+        exit 1
+    fi
+}
+
+# Wrapper: install one or more packages via detected package manager.
+# Usage: install_pkg <apt_name> <dnf_name> <pacman_name>
+# Pass "-" if a package is not needed on that distro.
+install_pkg() {
+    local apt_name="$1" dnf_name="$2" pacman_name="$3"
+    case "$PKG_MANAGER" in
+        apt)
+            [ "$apt_name" != "-" ] && sudo apt-get install -y "$apt_name"
+            ;;
+        dnf)
+            [ "$dnf_name" != "-" ] && sudo dnf install -y "$dnf_name"
+            ;;
+        pacman)
+            [ "$pacman_name" != "-" ] && sudo pacman -S --noconfirm "$pacman_name"
+            ;;
+    esac
+}
+
+# Install multiple packages at once (same name across distros).
+install_common_pkgs() {
+    case "$PKG_MANAGER" in
+        apt)    sudo apt-get install -y "$@" ;;
+        dnf)    sudo dnf install -y "$@" ;;
+        pacman) sudo pacman -S --noconfirm "$@" ;;
+    esac
+}
+
+# Update package manager cache.
+update_pkg_cache() {
+    case "$PKG_MANAGER" in
+        apt)    sudo apt-get update ;;
+        dnf)    sudo dnf check-update || true ;;
+        pacman) sudo pacman -Sy ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Check helpers
+# ---------------------------------------------------------------------------
+check_cmd() {
+    local cmd="$1"
+    if command -v "$cmd" &>/dev/null; then
+        ok "$cmd is installed: ${DIM}$(command -v "$cmd")${RESET}"
+        ((CHECKS_PASSED++)) || true
+        return 0
+    else
+        fail "$cmd is not installed."
+        MISSING=1
+        ((CHECKS_FAILED++)) || true
+        return 1
+    fi
+}
+
+check_env_dir() {
+    local var_name="$1"
+    local var_value="${!var_name:-}"
+
+    if [ -z "$var_value" ]; then
+        fail "Environment variable $var_name is not set."
+        MISSING=1
+        ((CHECKS_FAILED++)) || true
+        return 1
+    elif [ ! -d "$var_value" ]; then
+        fail "$var_name is set to '$var_value', but the directory does not exist."
+        MISSING=1
+        ((CHECKS_FAILED++)) || true
+        return 1
+    else
+        ok "$var_name is set: ${DIM}$var_value${RESET}"
+        ((CHECKS_PASSED++)) || true
+        return 0
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Individual checks
+# ---------------------------------------------------------------------------
+check_basic_utils() {
+    header "📦 Basic Utilities & Build Tools"
+    check_cmd curl  || true
+    check_cmd git   || true
+    check_cmd unzip || true
+    check_cmd wget  || true
+
+    # Build tools (distro-specific names)
+    if command -v gcc &>/dev/null && command -v make &>/dev/null; then
+        ok "Build essentials (gcc, make) are installed."
+        ((CHECKS_PASSED++)) || true
+    else
+        fail "Build essentials (gcc, make) are not fully installed."
+        MISSING=1
+        ((CHECKS_FAILED++)) || true
+    fi
+}
+
+check_node() {
+    header "🟢 Node.js & Ecosystem"
+
+    if ! command -v node &>/dev/null; then
+        fail "Node.js is not installed."
+        MISSING=1
+        ((CHECKS_FAILED++)) || true
+    else
+        local node_version
+        node_version=$(node -v | sed 's/^v//' | cut -d'.' -f1)
+        if [ "$node_version" -lt "$MIN_NODE_VERSION" ]; then
+            warn "Node.js v$node_version is installed, but v${MIN_NODE_VERSION}+ (LTS) is recommended."
+            ((CHECKS_WARNED++)) || true
+        else
+            ok "Node.js is installed: ${DIM}$(node -v)${RESET}"
+            ((CHECKS_PASSED++)) || true
+        fi
+    fi
+
+    check_cmd npm || true
+}
+
+check_eas() {
+    header "⚙️  EAS CLI"
+    if ! check_cmd eas; then
+        info "Install with: ${BOLD}npm install -g eas-cli${RESET}"
+    fi
+}
+
+check_java() {
+    header "☕ Java JDK (OpenJDK $MIN_JDK_VERSION+ required)"
+
+    if ! command -v java &>/dev/null; then
+        fail "Java is not installed."
+        MISSING=1
+        ((CHECKS_FAILED++)) || true
+    else
+        local java_version
+        java_version=$(java -version 2>&1 | head -n1 | grep -oP '(?<=\")\d+' | head -1)
+        if [ -n "$java_version" ] && [ "$java_version" -lt "$MIN_JDK_VERSION" ]; then
+            warn "Java $java_version is installed, but version ${MIN_JDK_VERSION}+ is required."
+            ((CHECKS_WARNED++)) || true
+        else
+            ok "Java is installed: ${DIM}version ${java_version:-unknown}${RESET}"
+            ((CHECKS_PASSED++)) || true
+        fi
+    fi
+
+    check_env_dir JAVA_HOME || true
+}
+
+check_android_sdk() {
+    header "🤖 Android SDK"
+
+    check_env_dir ANDROID_HOME || true
+
+    local sdk_dir="${ANDROID_HOME:-}"
+    if [ -n "$sdk_dir" ] && [ -d "$sdk_dir" ]; then
+        local sdk_ok=1
+
+        if [ -d "$sdk_dir/cmdline-tools" ]; then
+            ok "cmdline-tools directory found."
+            ((CHECKS_PASSED++)) || true
+        else
+            fail "cmdline-tools directory is missing."
+            ((CHECKS_FAILED++)) || true
+            sdk_ok=0
+        fi
+
+        if [ -d "$sdk_dir/platform-tools" ]; then
+            ok "platform-tools directory found."
+            ((CHECKS_PASSED++)) || true
+        else
+            fail "platform-tools directory is missing."
+            ((CHECKS_FAILED++)) || true
+            sdk_ok=0
+        fi
+
+        if [ -d "$sdk_dir/build-tools" ]; then
+            ok "build-tools directory found."
+            ((CHECKS_PASSED++)) || true
+        else
+            fail "build-tools directory is missing."
+            ((CHECKS_FAILED++)) || true
+            sdk_ok=0
+        fi
+
+        if ls "$sdk_dir/platforms/"android-* &>/dev/null 2>&1; then
+            ok "Android platform(s) found."
+            ((CHECKS_PASSED++)) || true
+        else
+            fail "No Android platforms installed."
+            ((CHECKS_FAILED++)) || true
+            sdk_ok=0
+        fi
+
+        if [ "$sdk_ok" -eq 0 ]; then
+            MISSING=1
+        fi
+    fi
+}
+
+check_watchman() {
+    header "👀 Watchman"
+
+    if command -v watchman &>/dev/null; then
+        ok "Watchman is installed."
+        ((CHECKS_PASSED++)) || true
+    else
+        warn "Watchman is not installed (optional, but recommended for Metro bundler performance)."
+        ((CHECKS_WARNED++)) || true
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Fix functions
+# ---------------------------------------------------------------------------
+fix_basic_utils() {
+    header "📦 Installing Basic Utilities & Build Tools..."
+
+    case "$PKG_MANAGER" in
+        apt)    install_common_pkgs curl git unzip wget build-essential ;;
+        dnf)    install_common_pkgs curl git unzip wget gcc make ;;
+        pacman) install_common_pkgs curl git unzip wget base-devel ;;
+    esac
+
+    ok "Basic utilities installed."
+}
+
+fix_node() {
+    if command -v node &>/dev/null; then
+        local node_version
+        node_version=$(node -v | sed 's/^v//' | cut -d'.' -f1)
+        if [ "$node_version" -ge "$MIN_NODE_VERSION" ]; then
+            ok "Node.js $(node -v) is already installed."
+            return
+        fi
+    fi
+
+    header "🟢 Installing Node.js via NVM..."
+
+    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+
+    export NVM_DIR="${HOME}/.nvm"
+    # shellcheck source=/dev/null
+    [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
+
+    nvm install --lts
+    nvm use --lts
+    nvm alias default 'lts/*'
+
+    ok "Node.js $(node -v) installed via NVM."
+}
+
+fix_eas() {
+    if command -v eas &>/dev/null; then
+        ok "EAS CLI is already installed."
+        return
+    fi
+
+    header "⚙️  Installing EAS CLI..."
+    npm install -g eas-cli
+    ok "EAS CLI installed."
+}
+
+fix_java() {
+    if command -v java &>/dev/null; then
+        ok "Java is already installed."
+    else
+        header "☕ Installing OpenJDK ${MIN_JDK_VERSION}..."
+        install_pkg "openjdk-${MIN_JDK_VERSION}-jdk" "java-${MIN_JDK_VERSION}-openjdk-devel" "jdk${MIN_JDK_VERSION}-openjdk"
+        ok "OpenJDK ${MIN_JDK_VERSION} installed."
+    fi
+
+    # Set JAVA_HOME if not already configured
+    if ! grep -q "JAVA_HOME" ~/.bashrc 2>/dev/null; then
+        header "☕ Configuring JAVA_HOME..."
+
+        local java_home_path=""
+        case "$PKG_MANAGER" in
+            apt)
+                java_home_path="/usr/lib/jvm/java-${MIN_JDK_VERSION}-openjdk-${JDK_ARCH}"
+                ;;
+            dnf)
+                java_home_path="/usr/lib/jvm/java-${MIN_JDK_VERSION}-openjdk"
+                ;;
+            pacman)
+                java_home_path="/usr/lib/jvm/java-${MIN_JDK_VERSION}-openjdk"
+                ;;
+        esac
+
+        if [ -n "$java_home_path" ]; then
+            echo "export JAVA_HOME=${java_home_path}" >> ~/.bashrc
+            export JAVA_HOME="${java_home_path}"
+            ok "JAVA_HOME set to ${java_home_path}"
+        fi
+    else
+        ok "JAVA_HOME is already configured in ~/.bashrc"
+    fi
+}
+
+fix_android_sdk() {
+    if [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/cmdline-tools" ]; then
+        ok "Android SDK is already configured."
+        return
+    fi
+
+    header "🤖 Installing Android SDK..."
+
+    local sdk_dir="${ANDROID_HOME:-$HOME/Android/Sdk}"
+    mkdir -p "$sdk_dir/cmdline-tools"
+
+    local tools_url="https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip"
+
+    info "Downloading Android command-line tools..."
+    local tmp_zip
+    tmp_zip=$(mktemp /tmp/cmdline-tools-XXXXXX.zip)
+    wget -q --show-progress "$tools_url" -O "$tmp_zip"
+
+    info "Extracting..."
+    unzip -q "$tmp_zip" -d "$sdk_dir/cmdline-tools"
+    rm -f "$tmp_zip"
+
+    # Rename extracted folder to 'latest'
+    if [ -d "$sdk_dir/cmdline-tools/cmdline-tools" ]; then
+        mv "$sdk_dir/cmdline-tools/cmdline-tools" "$sdk_dir/cmdline-tools/latest"
+    fi
+
+    # Write to ~/.bashrc if not already there
+    if ! grep -q "ANDROID_HOME" ~/.bashrc 2>/dev/null; then
+        {
+            echo "export ANDROID_HOME=${sdk_dir}"
+            echo 'export PATH=$PATH:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools'
+        } >> ~/.bashrc
+    fi
+
+    export ANDROID_HOME="$sdk_dir"
+    export PATH="$PATH:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools"
+
+    info "Accepting Android SDK licenses..."
+    yes | sdkmanager --licenses 2>/dev/null || true
+
+    info "Installing platform-tools, platform, and build-tools..."
+    sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM_VERSION}" "build-tools;${ANDROID_BUILD_TOOLS_VERSION}"
+
+    ok "Android SDK installed at ${sdk_dir}"
+}
+
+fix_watchman() {
+    if command -v watchman &>/dev/null; then
+        ok "Watchman is already installed."
+        return
+    fi
+
+    header "👀 Installing Watchman..."
+
+    case "$PKG_MANAGER" in
+        apt)
+            # Watchman may not be in default apt repos, try anyway
+            if apt-cache show watchman &>/dev/null 2>&1; then
+                sudo apt-get install -y watchman
+                ok "Watchman installed via apt."
+            else
+                warn "Watchman is not available in apt repositories."
+                info "Install manually: https://facebook.github.io/watchman/docs/install"
+            fi
+            ;;
+        dnf)
+            warn "Watchman is not available in default dnf repositories."
+            info "Install manually: https://facebook.github.io/watchman/docs/install"
+            ;;
+        pacman)
+            # Available in AUR, not official repos
+            warn "Watchman is available in AUR. Install with: yay -S watchman-bin"
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+print_summary() {
+    echo ""
+    divider
+    header "📋 Summary"
+    echo -e "   ${GREEN}Passed:${RESET}  $CHECKS_PASSED"
+    echo -e "   ${YELLOW}Warnings:${RESET} $CHECKS_WARNED"
+    echo -e "   ${RED}Failed:${RESET}  $CHECKS_FAILED"
+    divider
+
+    if [ "$MISSING" -eq 1 ]; then
+        echo ""
+        fail "Some essential components are missing or misconfigured."
+        info "Run ${BOLD}$SCRIPT_NAME --fix${RESET} to auto-install missing dependencies."
+        exit 1
+    else
+        echo ""
+        ok "${BOLD}Your system is ready for Expo local builds! 🎉${RESET}"
+        exit 0
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# CLI: --help
+# ---------------------------------------------------------------------------
+show_help() {
+    cat <<EOF
+${BOLD}$SCRIPT_NAME${RESET} v$VERSION
+Diagnose and fix your Expo/React Native local build environment on Linux.
+
+${BOLD}USAGE${RESET}
+    $SCRIPT_NAME              Run diagnostics (check mode)
+    $SCRIPT_NAME --fix        Auto-install missing dependencies
+    $SCRIPT_NAME --help       Show this help message
+    $SCRIPT_NAME --version    Show version
+
+${BOLD}WHAT GETS CHECKED${RESET}
+    • Basic utilities    curl, git, unzip, wget, gcc, make
+    • Node.js            v${MIN_NODE_VERSION}+ (via NVM)
+    • npm                Package manager
+    • EAS CLI            Expo Application Services
+    • Java JDK           OpenJDK ${MIN_JDK_VERSION}+
+    • JAVA_HOME          Environment variable
+    • Android SDK        ANDROID_HOME, cmdline-tools, platform-tools,
+                         build-tools, platforms
+    • Watchman           Optional, recommended for Metro
+
+${BOLD}SUPPORTED DISTROS${RESET}
+    • Debian / Ubuntu        (apt)
+    • Fedora / RHEL          (dnf)
+    • Arch Linux             (pacman)
+
+${BOLD}EXAMPLES${RESET}
+    # Check your system
+    ./expo-local-doctor
+
+    # Auto-fix everything
+    ./expo-local-doctor --fix
+
+    # Pipe-safe (colors auto-disabled)
+    ./expo-local-doctor 2>&1 | tee doctor-report.txt
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Error handler (for --fix mode)
+# ---------------------------------------------------------------------------
+error_handler() {
+    echo ""
+    fail "Execution stopped at line $1 due to a command failure."
+    info "Check the output above for details."
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+main() {
+    # Parse arguments
+    case "${1:-}" in
+        --help|-h)
+            show_help
+            exit 0
+            ;;
+        --version|-v)
+            echo "$SCRIPT_NAME v$VERSION"
+            exit 0
+            ;;
+        --fix|-f)
+            FIX_MODE=1
+            ;;
+        "")
+            FIX_MODE=0
+            ;;
+        *)
+            fail "Unknown option: $1"
+            info "Run ${BOLD}$SCRIPT_NAME --help${RESET} for usage."
+            exit 1
+            ;;
+    esac
+
+    # Detect system
+    detect_arch
+    detect_pkg_manager
+
+    if [ "$FIX_MODE" -eq 1 ]; then
+        # ── Fix Mode ──────────────────────────────────────────────
+        trap 'error_handler $LINENO' ERR
+
+        echo -e "${BOLD}${CYAN}🛠️  $SCRIPT_NAME v$VERSION — Fix Mode${RESET}"
+        info "Detected: ${BOLD}$PKG_MANAGER${RESET} on ${BOLD}$ARCH${RESET}"
+        divider
+
+        update_pkg_cache
+        fix_basic_utils
+        fix_node
+        fix_eas
+        fix_java
+        fix_android_sdk
+        fix_watchman
+
+        echo ""
+        divider
+        ok "${BOLD}All fixes applied successfully!${RESET}"
+        echo ""
+        warn "Run ${BOLD}source ~/.bashrc${RESET} or restart your terminal for changes to take effect."
+        info "Then run ${BOLD}$SCRIPT_NAME${RESET} to verify everything is set up."
+    else
+        # ── Check Mode ────────────────────────────────────────────
+        echo -e "${BOLD}${CYAN}🔍 $SCRIPT_NAME v$VERSION — Checking system readiness...${RESET}"
+        info "Detected: ${BOLD}$PKG_MANAGER${RESET} on ${BOLD}$ARCH${RESET}"
+        divider
+
+        check_basic_utils
+        check_node
+        check_eas
+        check_java
+        check_android_sdk
+        check_watchman
+        print_summary
+    fi
+}
+
+main "$@"

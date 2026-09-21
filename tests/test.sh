@@ -38,6 +38,10 @@ printf '{"dependencies":{"expo":"~57.0.23"}}\n' > "$TEMP_DIR/sdk57-project/packa
     detect_project
     assert_equals "$DETECTED_SDK_VERSION" "57" "SDK 57 is detected from package.json"
     assert_equals "$MIN_NODE_VERSION" "22.13.0" "SDK 57 uses exact Node minimum"
+    mkdir -p android
+    printf '%s\n' 'android { ndkVersion "26.1.10909125" }' > android/build.gradle
+    detect_project_ndk_override
+    assert_equals "$ANDROID_NDK_VERSION" "26.1.10909125" "Literal Gradle NDK override is detected"
 )
 
 mkdir -p "$TEMP_DIR/no-project"
@@ -145,14 +149,16 @@ assert_contains "$java_runtime_only_output" "Java compiler (javac) is not instal
 FAKE_ANDROID_HOME="$TEMP_DIR/fake-android-sdk"
 mkdir -p "$FAKE_ANDROID_HOME/cmdline-tools/latest/bin" "$FAKE_ANDROID_HOME/platform-tools" \
     "$FAKE_ANDROID_HOME/build-tools/36.0.0" "$FAKE_ANDROID_HOME/platforms/android-36" \
-    "$FAKE_ANDROID_HOME/ndk/27.1.12297006" "$FAKE_ANDROID_HOME/ndk/27.0.12077973/.installer"
-printf '%s\n' 'Pkg.Revision = 27.1.12297006' > "$FAKE_ANDROID_HOME/ndk/27.1.12297006/source.properties"
+    "$FAKE_ANDROID_HOME/ndk/27.1.12297006" "$FAKE_ANDROID_HOME/ndk/27.0.12077973/.installer" \
+    "$FAKE_ANDROID_HOME/ndk/backup/.installer"
+printf '%s\n' 'Pkg.Revision= 27.1.12297006' > "$FAKE_ANDROID_HOME/ndk/27.1.12297006/source.properties"
 android_output=$(PATH="$FAKE_BIN:$PATH" ANDROID_HOME="$FAKE_ANDROID_HOME" ANDROID_PLATFORM_VERSION="android-36" ANDROID_BUILD_TOOLS_VERSION="36.0.0" ANDROID_NDK_VERSION="27.1.12297006" check_android_sdk)
 assert_contains "$android_output" "android-36 platform found" "Android SDK check uses an isolated SDK fixture"
 assert_contains "$android_output" "NDK 27.1.12297006 found" "Android SDK check validates the required NDK revision"
 assert_contains "$android_output" "Incomplete NDK installations detected: 27.0.12077973" "Android SDK check reports incomplete NDK directories"
 clean_incomplete_ndk_dirs "$FAKE_ANDROID_HOME/ndk"
 [ ! -d "$FAKE_ANDROID_HOME/ndk/27.0.12077973" ] && test_pass "Fix removes only incomplete NDK directories" || test_fail "Fix removes only incomplete NDK directories"
+[ -d "$FAKE_ANDROID_HOME/ndk/backup" ] && test_pass "Fix preserves non-version NDK directories" || test_fail "Fix preserves non-version NDK directories"
 
 FIREWALL_LOG="$TEMP_DIR/check-firewall.log"
 firewall_output=$(PATH="$FAKE_BIN:$PATH" FIREWALL_LOG="$FIREWALL_LOG" check_firewall)
@@ -184,7 +190,7 @@ assert_equals "$noop_status" "2" "Unsupported SDK --fix exits before fixes"
 help_output=$("$SCRIPT" --help)
 version_output=$("$SCRIPT" --version)
 assert_contains "$help_output" "50, 51, 52, 53, 54, 55, 56, 57" "Help lists SDK 57"
-assert_equals "$version_output" "expo-local-doctor v1.3.3" "Version smoke test"
+assert_equals "$version_output" "expo-local-doctor v1.3.4" "Version smoke test"
 
 if [ "$FAIL" -gt 0 ]; then
     printf '%s test(s) failed; %s passed\n' "$FAIL" "$PASS" >&2

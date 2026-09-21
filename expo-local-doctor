@@ -14,7 +14,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION="1.3.3"
+VERSION="1.3.4"
 SCRIPT_NAME="expo-local-doctor"
 
 # Android command-line tools download version (latest stable)
@@ -45,8 +45,10 @@ MIN_JDK_VERSION=""
 ANDROID_PLATFORM_VERSION=""
 ANDROID_BUILD_TOOLS_VERSION=""
 ANDROID_NDK_VERSION=""
+SDK_NDK_VERSION=""
 DETECTED_SDK_VERSION=""
 SDK_SOURCE=""
+PROJECT_NDK_SOURCE=""
 RESOLVED_JAVA_HOME=""
 ANDROID_CMDLINE_TOOLS_BIN=""
 
@@ -146,6 +148,7 @@ resolve_sdk_versions() {
             ANDROID_PLATFORM_VERSION="android-${compile_sdk}"
             ANDROID_BUILD_TOOLS_VERSION="$build_tools"
             ANDROID_NDK_VERSION="$ndk"
+            SDK_NDK_VERSION="$ndk"
             DETECTED_SDK_VERSION="$sdk"
             return 0
         fi
@@ -224,6 +227,28 @@ detect_project() {
         resolve_sdk_versions "$DEFAULT_SDK_VERSION"
         SDK_SOURCE="latest defaults (no project detected)"
     fi
+}
+
+# A native project can explicitly pin an NDK different from Expo's default.
+# Honor a literal Gradle value so diagnosis matches the NDK Gradle will use.
+detect_project_ndk_override() {
+    local project_dir file override
+    PROJECT_NDK_SOURCE=""
+    [ -n "$SDK_SOURCE" ] && [ -f "$SDK_SOURCE" ] || return 0
+    project_dir=$(dirname "$SDK_SOURCE")
+
+    for file in "$project_dir/android/build.gradle" "$project_dir/android/app/build.gradle" "$project_dir/android/build.gradle.kts" "$project_dir/android/app/build.gradle.kts"; do
+        [ -f "$file" ] || continue
+        override=$(grep -oP "ndkVersion\\s*(?:=|\\s)\\s*['\"]\\K[0-9]+(?:\\.[0-9]+)+" "$file" | head -1 || true)
+        if [ -n "$override" ]; then
+            PROJECT_NDK_SOURCE="$file"
+            if [ "$override" != "$SDK_NDK_VERSION" ]; then
+                warn "Project overrides Expo SDK NDK ${SDK_NDK_VERSION} with ${override} in $file."
+                ANDROID_NDK_VERSION="$override"
+            fi
+            return 0
+        fi
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -430,27 +455,29 @@ check_java() {
 ndk_revision() {
     local ndk_dir="$1"
     [ -f "$ndk_dir/source.properties" ] || return 1
-    awk -F ' = ' '$1 == "Pkg.Revision" { print $2; exit }' "$ndk_dir/source.properties"
+    awk -F '=' '$1 ~ /^[[:space:]]*Pkg.Revision[[:space:]]*$/ { value=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); print value; exit }' "$ndk_dir/source.properties"
 }
 
 list_incomplete_ndk_dirs() {
-    local ndk_root="$1" candidate
+    local ndk_root="$1" candidate name
     [ -d "$ndk_root" ] || return 0
     (
         shopt -s nullglob
         for candidate in "$ndk_root"/*; do
-            [ -d "$candidate" ] && [ ! -f "$candidate/source.properties" ] && basename "$candidate"
+            name=$(basename "$candidate")
+            [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -d "$candidate" ] && [ ! -f "$candidate/source.properties" ] && printf '%s\n' "$name"
         done
     ) | sort | awk 'NR == 1 { result = $0; next } { result = result ", " $0 } END { printf "%s", result }'
 }
 
 clean_incomplete_ndk_dirs() {
-    local ndk_root="$1" candidate
+    local ndk_root="$1" candidate name
     [ -d "$ndk_root" ] || return 0
     (
         shopt -s nullglob
         for candidate in "$ndk_root"/*; do
-            [ -d "$candidate" ] && [ ! -f "$candidate/source.properties" ] || continue
+            name=$(basename "$candidate")
+            [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -d "$candidate" ] && [ ! -f "$candidate/source.properties" ] || continue
             warn "Removing incomplete Android NDK installation: $candidate"
             rm -rf -- "$candidate"
         done
@@ -1195,6 +1222,7 @@ main() {
 
     # Detect Expo SDK and project package manager (single directory walk)
     detect_project
+    detect_project_ndk_override
 
     if [ "$FIX_MODE" -eq 1 ]; then
         # ── Fix Mode ──────────────────────────────────────────────

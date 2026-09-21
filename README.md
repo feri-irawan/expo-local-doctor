@@ -64,7 +64,7 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 
 **Example output:**
 ```
-🔍 expo-local-doctor v1.3.3 — Checking system readiness...
+🔍 expo-local-doctor v1.3.4 — Checking system readiness...
 ℹ  Detected: apt on x86_64
 ℹ  Expo SDK: 57 (from ./package.json)
 ℹ  Requirements: Node ≥22.13.0, JDK 17, android-36, build-tools 36.0.0, NDK 27.1.12297006
@@ -149,7 +149,7 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 | **EAS CLI** | Expo Application Services CLI |
 | **Java JDK** | OpenJDK 17+ with the `javac` compiler (a runtime-only Java installation does not pass) |
 | **JAVA_HOME** | Environment variable pointing to JDK; `--fix` writes an idempotent block to the active Bash, Zsh, or Fish profile |
-| **Android SDK** | `ANDROID_HOME`, `cmdline-tools`, `platform-tools`, exact `build-tools`, platform, and NDK per SDK; incomplete NDK installs are detected and removed by `--fix` |
+| **Android SDK** | `ANDROID_HOME`, `cmdline-tools`, `platform-tools`, exact `build-tools`, platform, and NDK per SDK; literal Gradle `ndkVersion` overrides are honored, and incomplete versioned NDK installs are removed by `--fix` |
 | **adb in PATH** | Warns if `$ANDROID_HOME/platform-tools` is not on `$PATH` |
 | **Watchman** | Recommended for Metro on Expo SDK 55 and earlier; not required on SDK 56+ |
 | **Firewall** | UFW / Firewalld status & Metro port `8081` accessibility (active default Firewalld zone; container zones are skipped) |

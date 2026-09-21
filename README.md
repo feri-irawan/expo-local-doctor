@@ -64,7 +64,7 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 
 **Example output:**
 ```
-🔍 expo-local-doctor v1.3.0 — Checking system readiness...
+🔍 expo-local-doctor v1.3.1 — Checking system readiness...
 ℹ  Detected: apt on x86_64
 ℹ  Expo SDK: 57 (from ./package.json)
 ℹ  Requirements: Node ≥22.13.0, JDK 17, android-36, build-tools 36.0.0
@@ -150,7 +150,7 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 | **JAVA_HOME** | Environment variable pointing to JDK; `--fix` writes an idempotent block to the active Bash, Zsh, or Fish profile |
 | **Android SDK** | `ANDROID_HOME`, `cmdline-tools`, `platform-tools`, exact `build-tools` and platform per SDK |
 | **adb in PATH** | Warns if `$ANDROID_HOME/platform-tools` is not on `$PATH` |
-| **Watchman** | Optional, recommended for Metro bundler performance |
+| **Watchman** | Recommended for Metro on Expo SDK 55 and earlier; not required on SDK 56+ |
 | **Firewall** | UFW / Firewalld status & Metro port `8081` accessibility (active default Firewalld zone; container zones are skipped) |
 
 > Version requirements are sourced from the [Expo SDK documentation](https://docs.expo.dev/versions/latest/) and automatically matched to your project.
@@ -168,7 +168,7 @@ If a project uses an Expo SDK not yet in the tool's version map, the command exi
 | EAS CLI | `npm install -g eas-cli` |
 | OpenJDK 17 | System package manager |
 | Android SDK | Official Google command-line tools |
-| Watchman | System package manager (when available) |
+| Watchman | System package manager when needed for Expo SDK 55 or earlier |
 | Firewall | `sudo ufw allow 8081/tcp comment 'Expo'` or `firewall-cmd` |
 
 ---

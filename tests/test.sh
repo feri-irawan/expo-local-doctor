@@ -119,6 +119,12 @@ assert_contains "$node_old_output" "v22.13.0+ is required" "Node check rejects a
 node_exact_output=$(PATH="$FAKE_BIN:$PATH" NODE_FIXTURE="22.13.0" MIN_NODE_VERSION="22.13.0" DETECTED_SDK_VERSION="57" check_node)
 assert_contains "$node_exact_output" "Node.js is installed: v22.13.0" "Node check accepts the exact minimum"
 
+watchman_sdk57_output=$(PATH="$FAKE_BIN" DETECTED_SDK_VERSION="57" check_watchman)
+assert_contains "$watchman_sdk57_output" "not required for Expo SDK 56+" "Watchman is non-blocking for SDK 57"
+if [[ "$watchman_sdk57_output" == *"⚠️"* ]]; then test_fail "SDK 57 Watchman check has no warning"; else test_pass "SDK 57 Watchman check has no warning"; fi
+watchman_fix_sdk57_output=$(PATH="$FAKE_BIN" DETECTED_SDK_VERSION="57" fix_watchman)
+assert_contains "$watchman_fix_sdk57_output" "skipping installation" "SDK 57 fix mode skips Watchman installation"
+
 FAKE_JAVA_HOME="$TEMP_DIR/fake-jdk"
 mkdir -p "$FAKE_JAVA_HOME"
 java_output=$(PATH="$FAKE_BIN:$PATH" JAVA_HOME="$FAKE_JAVA_HOME" MIN_JDK_VERSION="17" check_java)
@@ -160,7 +166,7 @@ assert_equals "$noop_status" "2" "Unsupported SDK --fix exits before fixes"
 help_output=$("$SCRIPT" --help)
 version_output=$("$SCRIPT" --version)
 assert_contains "$help_output" "50, 51, 52, 53, 54, 55, 56, 57" "Help lists SDK 57"
-assert_equals "$version_output" "expo-local-doctor v1.3.0" "Version smoke test"
+assert_equals "$version_output" "expo-local-doctor v1.3.1" "Version smoke test"
 
 if [ "$FAIL" -gt 0 ]; then
     printf '%s test(s) failed; %s passed\n' "$FAIL" "$PASS" >&2

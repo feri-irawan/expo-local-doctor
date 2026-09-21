@@ -14,7 +14,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION="1.3.0"
+VERSION="1.3.1"
 SCRIPT_NAME="expo-local-doctor"
 
 # Android command-line tools download version (latest stable)
@@ -486,6 +486,9 @@ check_watchman() {
     if command -v watchman &>/dev/null; then
         ok "Watchman is installed."
         ((CHECKS_PASSED++)) || true
+    elif version_at_least "$DETECTED_SDK_VERSION" "56.0.0"; then
+        ok "Watchman is not installed (not required for Expo SDK 56+)."
+        ((CHECKS_PASSED++)) || true
     else
         warn "Watchman is not installed (optional, but recommended for Metro bundler performance)."
         ((CHECKS_WARNED++)) || true
@@ -866,6 +869,11 @@ fix_watchman() {
         return
     fi
 
+    if version_at_least "$DETECTED_SDK_VERSION" "56.0.0"; then
+        ok "Watchman is not required for Expo SDK 56+; skipping installation."
+        return
+    fi
+
     header "👀 Installing Watchman..."
 
     case "$PKG_MANAGER" in
@@ -1001,7 +1009,7 @@ ${BOLD}WHAT GETS CHECKED${RESET}
     • JAVA_HOME          Environment variable
     • Android SDK        ANDROID_HOME, cmdline-tools, platform-tools,
                          build-tools, platforms (versions per SDK)
-    • Watchman           Optional, recommended for Metro
+    • Watchman           Recommended for Expo SDK 55 and earlier
     • Firewall           UFW / Firewalld status & Metro port 8081 accessibility
 
 ${BOLD}SUPPORTED SDKs${RESET}

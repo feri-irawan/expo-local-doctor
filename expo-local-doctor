@@ -498,6 +498,36 @@ parse_firewalld_active_zones() {
     awk '/^[^[:space:]]/ { print $1 }'
 }
 
+# Return success if a firewalld --list-ports value explicitly permits Metro.
+# firewalld may report either a single port (8081/tcp) or a range that covers it.
+firewalld_ports_allow_metro() {
+    local ports="$1" port_spec start_port end_port
+    for port_spec in $ports; do
+        if [ "$port_spec" = "8081/tcp" ]; then
+            return 0
+        fi
+        if [[ "$port_spec" =~ ^([0-9]+)-([0-9]+)/tcp$ ]]; then
+            start_port="${BASH_REMATCH[1]}"
+            end_port="${BASH_REMATCH[2]}"
+            if ((10#$start_port <= 8081 && 8081 <= 10#$end_port)); then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+# Metro is accessed through the host network. Only the default zone is a safe
+# automatic target; container zones (for example, docker) are intentionally skipped.
+get_active_default_firewalld_zone() {
+    local active_zones="$1" default_zone="$2"
+    if parse_firewalld_active_zones <<< "$active_zones" | grep -Fxq "$default_zone"; then
+        printf '%s' "$default_zone"
+        return 0
+    fi
+    return 1
+}
+
 check_firewall() {
     header "🛡️  Firewall (UFW / Firewalld)"
 
@@ -534,24 +564,23 @@ check_firewall() {
     fi
 
     if [ "$firewalld_active" -eq 1 ]; then
-        local zone runtime_ports permanent_ports zones
-        if zones=$(sudo -n firewall-cmd --get-active-zones 2>/dev/null); then
-            if ! parse_firewalld_active_zones <<< "$zones" | grep -q .; then
-                zones=$(sudo -n firewall-cmd --get-default-zone 2>/dev/null || true)
+        local zone runtime_ports permanent_ports active_zones default_zone
+        if active_zones=$(sudo -n firewall-cmd --get-active-zones 2>/dev/null) && default_zone=$(sudo -n firewall-cmd --get-default-zone 2>/dev/null); then
+            if ! zone=$(get_active_default_firewalld_zone "$active_zones" "$default_zone"); then
+                warn "firewalld default zone '$default_zone' is not active; not checking container or unknown zones automatically."
+                ((CHECKS_WARNED++)) || true
+                return 0
             fi
-            while IFS= read -r zone; do
-                [ -n "$zone" ] || continue
-                runtime_ports=$(sudo -n firewall-cmd --zone="$zone" --list-ports 2>/dev/null || true)
-                permanent_ports=$(sudo -n firewall-cmd --permanent --zone="$zone" --list-ports 2>/dev/null || true)
-                if grep -qw "8081/tcp" <<< "$runtime_ports" && grep -qw "8081/tcp" <<< "$permanent_ports"; then
-                    ok "firewalld zone '$zone' allows port 8081/tcp for Metro."
-                    ((CHECKS_PASSED++)) || true
-                else
-                    warn "firewalld zone '$zone' does not allow port 8081/tcp in both runtime and permanent rules."
-                    info "Allow it with: ${BOLD}sudo firewall-cmd --zone=$zone --add-port=8081/tcp --permanent && sudo firewall-cmd --reload${RESET}"
-                    ((CHECKS_WARNED++)) || true
-                fi
-            done < <(parse_firewalld_active_zones <<< "$zones")
+            runtime_ports=$(sudo -n firewall-cmd --zone="$zone" --list-ports 2>/dev/null || true)
+            permanent_ports=$(sudo -n firewall-cmd --permanent --zone="$zone" --list-ports 2>/dev/null || true)
+            if firewalld_ports_allow_metro "$runtime_ports" && firewalld_ports_allow_metro "$permanent_ports"; then
+                ok "firewalld default zone '$zone' allows port 8081/tcp for Metro."
+                ((CHECKS_PASSED++)) || true
+            else
+                warn "firewalld default zone '$zone' does not allow port 8081/tcp in both runtime and permanent rules."
+                info "Allow it with: ${BOLD}sudo firewall-cmd --zone=$zone --add-port=8081/tcp --permanent && sudo firewall-cmd --reload${RESET}"
+                ((CHECKS_WARNED++)) || true
+            fi
         else
             ok "firewalld is active. (Run with sudo to verify port 8081 rules)"
             info "If LAN connection to Metro fails, allow port 8081 in its active zone with: ${BOLD}sudo firewall-cmd --get-active-zones${RESET}"
@@ -886,36 +915,34 @@ fix_firewall() {
     fi
 
     if [ "$firewalld_active" -eq 1 ]; then
-        local zone zones changed=0
-        zones=$(sudo firewall-cmd --get-active-zones | parse_firewalld_active_zones)
-        if [ -z "$zones" ]; then
-            zones=$(sudo firewall-cmd --get-default-zone)
+        local zone active_zones default_zone changed=0 permanent_ports runtime_ports
+        active_zones=$(sudo firewall-cmd --get-active-zones)
+        default_zone=$(sudo firewall-cmd --get-default-zone)
+        if ! zone=$(get_active_default_firewalld_zone "$active_zones" "$default_zone"); then
+            warn "firewalld default zone '$default_zone' is not active; no firewall rule was changed."
+            return 0
         fi
 
-        while IFS= read -r zone; do
-            [ -n "$zone" ] || continue
-            if sudo firewall-cmd --permanent --zone="$zone" --list-ports | grep -qw "8081/tcp"; then
-                ok "firewalld permanent rule for 8081/tcp already exists in zone '$zone'."
-            else
-                header "🛡️  Configuring firewalld zone '$zone' for Expo Metro (Port 8081)..."
-                sudo firewall-cmd --zone="$zone" --add-port=8081/tcp --permanent
-                changed=1
-            fi
-        done <<< "$zones"
+        permanent_ports=$(sudo firewall-cmd --permanent --zone="$zone" --list-ports)
+        if firewalld_ports_allow_metro "$permanent_ports"; then
+            ok "firewalld permanent rule set already allows port 8081/tcp in default zone '$zone'."
+        else
+            header "🛡️  Configuring firewalld default zone '$zone' for Expo Metro (Port 8081)..."
+            sudo firewall-cmd --zone="$zone" --add-port=8081/tcp --permanent
+            changed=1
+        fi
 
         if [ "$changed" -eq 1 ]; then
             sudo firewall-cmd --reload
         fi
 
-        while IFS= read -r zone; do
-            [ -n "$zone" ] || continue
-            if sudo firewall-cmd --zone="$zone" --list-ports | grep -qw "8081/tcp"; then
-                ok "firewalld zone '$zone' allows port 8081/tcp."
-            else
-                fail "firewalld zone '$zone' still does not allow port 8081/tcp after reload."
-                exit 1
-            fi
-        done <<< "$zones"
+        runtime_ports=$(sudo firewall-cmd --zone="$zone" --list-ports)
+        if firewalld_ports_allow_metro "$runtime_ports"; then
+            ok "firewalld default zone '$zone' allows port 8081/tcp."
+        else
+            fail "firewalld default zone '$zone' still does not allow port 8081/tcp after reload."
+            exit 1
+        fi
     fi
 }
 

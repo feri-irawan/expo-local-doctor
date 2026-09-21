@@ -101,9 +101,10 @@ printf '%s\n' '#!/usr/bin/env bash' '[ "${1:-}" = "-n" ] && shift' 'exec "$@"' >
 printf '%s\n' '#!/usr/bin/env bash' \
     '[ -n "${FIREWALL_LOG:-}" ] && printf "%s\\n" "$*" >> "$FIREWALL_LOG"' \
     'case " $* " in' \
-    '  *" --get-active-zones "*) printf "work (default)\\n  interfaces: eth0\\n" ;;' \
+    '  *" --get-active-zones "*) printf "work (default)\\n  interfaces: eth0\\ndocker\\n  interfaces: docker0\\n" ;;' \
+    '  *" --get-default-zone "*) printf "work\\n" ;;' \
     '  *" --add-port=8081/tcp --permanent "*) touch "$FIREWALL_STATE" ;;' \
-    '  *" --list-ports "*) [ "${FIREWALL_MODE:-check}" = "check" ] || [ -f "${FIREWALL_STATE:-}" ] && printf "8081/tcp\\n" ;;' \
+    '  *" --list-ports "*) if [ "${FIREWALL_MODE:-check}" = "range" ]; then printf "1025-65535/tcp\\n"; elif [ "${FIREWALL_MODE:-check}" = "check" ] || [ -f "${FIREWALL_STATE:-}" ]; then printf "8081/tcp\\n"; fi ;;' \
     '  *) exit 0 ;;' \
     'esac' > "$FAKE_BIN/firewall-cmd"
 printf '%s\n' '#!/usr/bin/env bash' 'printf "v%s\\n" "${NODE_FIXTURE:-22.13.0}"' > "$FAKE_BIN/node"
@@ -131,15 +132,20 @@ assert_contains "$android_output" "android-36 platform found" "Android SDK check
 
 FIREWALL_LOG="$TEMP_DIR/check-firewall.log"
 firewall_output=$(PATH="$FAKE_BIN:$PATH" FIREWALL_LOG="$FIREWALL_LOG" check_firewall)
-assert_contains "$firewall_output" "zone 'work' allows port 8081/tcp" "Firewalld checks the active interface zone"
+assert_contains "$firewall_output" "default zone 'work' allows port 8081/tcp" "Firewalld checks the active default zone"
 assert_contains "$(<"$FIREWALL_LOG")" '--zone=work --list-ports' "Firewalld checks runtime ports in the active zone"
 assert_contains "$(<"$FIREWALL_LOG")" '--permanent --zone=work --list-ports' "Firewalld checks permanent ports in the active zone"
+if grep -q -- '--zone=docker' "$FIREWALL_LOG"; then test_fail "Firewalld skips container zones"; else test_pass "Firewalld skips container zones"; fi
+
+range_firewall_output=$(PATH="$FAKE_BIN:$PATH" FIREWALL_MODE="range" check_firewall)
+assert_contains "$range_firewall_output" "default zone 'work' allows port 8081/tcp" "Firewalld recognizes a port range covering Metro"
 
 FIREWALL_LOG="$TEMP_DIR/fix-firewall.log"
 FIREWALL_STATE="$TEMP_DIR/fix-firewall.state"
 PATH="$FAKE_BIN:$PATH" FIREWALL_MODE="fix" FIREWALL_LOG="$FIREWALL_LOG" FIREWALL_STATE="$FIREWALL_STATE" fix_firewall
-assert_contains "$(<"$FIREWALL_LOG")" '--zone=work --add-port=8081/tcp --permanent' "Fix firewall adds permanent rule to active zone"
+assert_contains "$(<"$FIREWALL_LOG")" '--zone=work --add-port=8081/tcp --permanent' "Fix firewall adds permanent rule to default zone"
 assert_contains "$(<"$FIREWALL_LOG")" '--reload' "Fix firewall reloads after changing permanent rules"
+if grep -q -- '--zone=docker' "$FIREWALL_LOG"; then test_fail "Fix firewall skips container zones"; else test_pass "Fix firewall skips container zones"; fi
 
 NOOP_MARKER="$TEMP_DIR/unsupported-fix.marker"
 printf '%s\n' '#!/usr/bin/env bash' 'touch "$NOOP_MARKER"' > "$FAKE_BIN/dnf"

@@ -151,7 +151,7 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 | **Android SDK** | `ANDROID_HOME`, `cmdline-tools`, `platform-tools`, exact `build-tools` and platform per SDK |
 | **adb in PATH** | Warns if `$ANDROID_HOME/platform-tools` is not on `$PATH` |
 | **Watchman** | Optional, recommended for Metro bundler performance |
-| **Firewall** | UFW / Firewalld status & Metro port `8081` accessibility (active Firewalld zones) |
+| **Firewall** | UFW / Firewalld status & Metro port `8081` accessibility (active default Firewalld zone; container zones are skipped) |
 
 > Version requirements are sourced from the [Expo SDK documentation](https://docs.expo.dev/versions/latest/) and automatically matched to your project.
 

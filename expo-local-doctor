@@ -14,7 +14,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION="1.2.0"
+VERSION="1.3.0"
 SCRIPT_NAME="expo-local-doctor"
 
 # Android command-line tools download version (latest stable)
@@ -26,17 +26,18 @@ ANDROID_CMDLINE_TOOLS_VERSION="11076708"
 # Source: https://docs.expo.dev/versions/latest/
 # ---------------------------------------------------------------------------
 SDK_VERSION_MAP=(
-    "56|22|17|36|36.0.0"
-    "55|20|17|36|36.0.0"
-    "54|20|17|36|36.0.0"
-    "53|18|17|35|35.0.0"
-    "52|18|17|35|35.0.0"
-    "51|18|17|34|34.0.0"
-    "50|18|17|34|34.0.0"
+    "57|22.13.0|17|36|36.0.0"
+    "56|20.19.0|17|36|36.0.0"
+    "55|20.19.4|17|36|36.0.0"
+    "54|20.19.0|17|36|36.0.0"
+    "53|18.18.0|17|35|35.0.0"
+    "52|18.18.0|17|35|35.0.0"
+    "51|18.18.0|17|34|34.0.0"
+    "50|18.18.0|17|34|34.0.0"
 )
 
 # Default fallback (latest known SDK)
-DEFAULT_SDK_VERSION=56
+DEFAULT_SDK_VERSION=57
 
 # These will be set by resolve_sdk_versions()
 MIN_NODE_VERSION=""
@@ -45,6 +46,33 @@ ANDROID_PLATFORM_VERSION=""
 ANDROID_BUILD_TOOLS_VERSION=""
 DETECTED_SDK_VERSION=""
 SDK_SOURCE=""
+RESOLVED_JAVA_HOME=""
+ANDROID_CMDLINE_TOOLS_BIN=""
+
+# Return success when $1 is greater than or equal to $2. Versions may omit
+# minor or patch components, but are compared numerically as X.Y.Z.
+version_at_least() {
+    local actual="$1" required="$2"
+    local -a actual_parts required_parts
+    local i actual_part required_part
+
+    actual="${actual#v}"
+    required="${required#v}"
+    IFS='.' read -r -a actual_parts <<< "$actual"
+    IFS='.' read -r -a required_parts <<< "$required"
+
+    for i in 0 1 2; do
+        actual_part="${actual_parts[i]:-0}"
+        required_part="${required_parts[i]:-0}"
+        [[ "$actual_part" =~ ^[0-9]+$ && "$required_part" =~ ^[0-9]+$ ]] || return 1
+        if ((10#$actual_part > 10#$required_part)); then
+            return 0
+        elif ((10#$actual_part < 10#$required_part)); then
+            return 1
+        fi
+    done
+    return 0
+}
 
 # ---------------------------------------------------------------------------
 # Color support (auto-detect TTY)
@@ -128,7 +156,8 @@ PROJECT_PKG_MANAGER=""
 # Detect the Expo SDK version and the project's package manager in a single
 # walk up from $PWD. The first package.json with a usable "expo" dependency
 # sets the SDK; the first one with a packageManager field or adjacent lock file
-# sets the package manager. Falls back to the latest known SDK if none found.
+# sets the package manager. Falls back to the latest known SDK only when no
+# Expo dependency is found anywhere in the current directory tree.
 detect_project() {
     # --sdk override short-circuits SDK detection (the PM is still scanned for)
     local sdk_resolved=0
@@ -136,9 +165,9 @@ detect_project() {
         if resolve_sdk_versions "$USER_SDK_OVERRIDE"; then
             SDK_SOURCE="--sdk flag"
         else
-            warn "Unknown SDK version: $USER_SDK_OVERRIDE. Using latest defaults (SDK $DEFAULT_SDK_VERSION)."
-            resolve_sdk_versions "$DEFAULT_SDK_VERSION"
-            SDK_SOURCE="latest defaults (unknown --sdk)"
+            fail "Expo SDK $USER_SDK_OVERRIDE is not supported by this version of $SCRIPT_NAME."
+            info "Update $SCRIPT_NAME or use a supported SDK version."
+            exit 2
         fi
         sdk_resolved=1
     fi
@@ -156,7 +185,9 @@ detect_project() {
                         SDK_SOURCE="$dir/package.json"
                         sdk_resolved=1
                     else
-                        warn "Expo SDK $expo_ver found in $dir/package.json but not in version map."
+                        fail "Expo SDK $expo_ver found in $dir/package.json but is not supported by this version of $SCRIPT_NAME."
+                        info "Update $SCRIPT_NAME before diagnosing or fixing this project."
+                        exit 2
                     fi
                 fi
             fi
@@ -315,8 +346,8 @@ check_node() {
         ((CHECKS_FAILED++)) || true
     else
         local node_version
-        node_version=$(node -v | sed 's/^v//' | cut -d'.' -f1)
-        if [ -n "$node_version" ] && [ "$node_version" -lt "$MIN_NODE_VERSION" ]; then
+        node_version=$(node -v | sed 's/^v//')
+        if ! version_at_least "$node_version" "$MIN_NODE_VERSION"; then
             fail "Node.js v$node_version is installed, but v${MIN_NODE_VERSION}+ is required for Expo SDK ${DETECTED_SDK_VERSION}."
             MISSING=1
             ((CHECKS_FAILED++)) || true
@@ -399,10 +430,10 @@ check_android_sdk() {
         if [ -d "$sdk_dir/build-tools/${ANDROID_BUILD_TOOLS_VERSION}" ]; then
             ok "build-tools ${ANDROID_BUILD_TOOLS_VERSION} found."
             ((CHECKS_PASSED++)) || true
-        elif [ -d "$sdk_dir/build-tools" ] && ls "$sdk_dir/build-tools/" &>/dev/null 2>&1; then
+        elif [ -d "$sdk_dir/build-tools" ]; then
             local installed_bt
-            installed_bt=$(ls "$sdk_dir/build-tools/" | head -1)
-            fail "build-tools ${installed_bt} found, but ${ANDROID_BUILD_TOOLS_VERSION} is required for SDK ${DETECTED_SDK_VERSION}."
+            installed_bt=$(list_android_versions "$sdk_dir/build-tools")
+            fail "build-tools ${installed_bt:-none} found, but ${ANDROID_BUILD_TOOLS_VERSION} is required for SDK ${DETECTED_SDK_VERSION}."
             MISSING=1
             ((CHECKS_FAILED++)) || true
         else
@@ -414,10 +445,10 @@ check_android_sdk() {
         if [ -d "$sdk_dir/platforms/${ANDROID_PLATFORM_VERSION}" ]; then
             ok "${ANDROID_PLATFORM_VERSION} platform found."
             ((CHECKS_PASSED++)) || true
-        elif ls "$sdk_dir/platforms/"android-* &>/dev/null 2>&1; then
+        elif [ -d "$sdk_dir/platforms" ]; then
             local installed_plat
-            installed_plat=$(ls "$sdk_dir/platforms/" | tail -1)
-            fail "Platform ${installed_plat} found, but ${ANDROID_PLATFORM_VERSION} is required for SDK ${DETECTED_SDK_VERSION}."
+            installed_plat=$(list_android_versions "$sdk_dir/platforms")
+            fail "Platforms ${installed_plat:-none} found, but ${ANDROID_PLATFORM_VERSION} is required for SDK ${DETECTED_SDK_VERSION}."
             MISSING=1
             ((CHECKS_FAILED++)) || true
         else
@@ -436,6 +467,19 @@ check_android_sdk() {
     fi
 }
 
+# Print directory names as a comma-separated list without relying on ls order.
+list_android_versions() {
+    local parent="$1" child name
+    (
+        shopt -s nullglob
+        for child in "$parent"/*; do
+            [ -d "$child" ] || continue
+            name=$(basename "$child")
+            printf '%s\n' "$name"
+        done
+    ) | sort | awk 'NR == 1 { result = $0; next } { result = result ", " $0 } END { printf "%s", result }'
+}
+
 check_watchman() {
     header "👀 Watchman"
 
@@ -446,6 +490,12 @@ check_watchman() {
         warn "Watchman is not installed (optional, but recommended for Metro bundler performance)."
         ((CHECKS_WARNED++)) || true
     fi
+}
+
+# `firewall-cmd --get-active-zones` prints a non-indented zone header, which
+# may end in " (default)", followed by indented interface/source lines.
+parse_firewalld_active_zones() {
+    awk '/^[^[:space:]]/ { print $1 }'
 }
 
 check_firewall() {
@@ -484,19 +534,27 @@ check_firewall() {
     fi
 
     if [ "$firewalld_active" -eq 1 ]; then
-        local firewalld_output
-        if firewalld_output=$(sudo -n firewall-cmd --list-ports 2>/dev/null); then
-            if echo "$firewalld_output" | grep -q "8081/tcp"; then
-                ok "firewalld is active and port 8081/tcp is allowed for Metro."
-                ((CHECKS_PASSED++)) || true
-            else
-                warn "firewalld is active, but port 8081/tcp is not in the allow list."
-                info "Allow port 8081 with: ${BOLD}sudo firewall-cmd --add-port=8081/tcp --permanent && sudo firewall-cmd --reload${RESET}"
-                ((CHECKS_WARNED++)) || true
+        local zone runtime_ports permanent_ports zones
+        if zones=$(sudo -n firewall-cmd --get-active-zones 2>/dev/null); then
+            if ! parse_firewalld_active_zones <<< "$zones" | grep -q .; then
+                zones=$(sudo -n firewall-cmd --get-default-zone 2>/dev/null || true)
             fi
+            while IFS= read -r zone; do
+                [ -n "$zone" ] || continue
+                runtime_ports=$(sudo -n firewall-cmd --zone="$zone" --list-ports 2>/dev/null || true)
+                permanent_ports=$(sudo -n firewall-cmd --permanent --zone="$zone" --list-ports 2>/dev/null || true)
+                if grep -qw "8081/tcp" <<< "$runtime_ports" && grep -qw "8081/tcp" <<< "$permanent_ports"; then
+                    ok "firewalld zone '$zone' allows port 8081/tcp for Metro."
+                    ((CHECKS_PASSED++)) || true
+                else
+                    warn "firewalld zone '$zone' does not allow port 8081/tcp in both runtime and permanent rules."
+                    info "Allow it with: ${BOLD}sudo firewall-cmd --zone=$zone --add-port=8081/tcp --permanent && sudo firewall-cmd --reload${RESET}"
+                    ((CHECKS_WARNED++)) || true
+                fi
+            done < <(parse_firewalld_active_zones <<< "$zones")
         else
             ok "firewalld is active. (Run with sudo to verify port 8081 rules)"
-            info "If LAN connection to Metro fails on physical devices, allow port 8081: ${BOLD}sudo firewall-cmd --add-port=8081/tcp --permanent && sudo firewall-cmd --reload${RESET}"
+            info "If LAN connection to Metro fails, allow port 8081 in its active zone with: ${BOLD}sudo firewall-cmd --get-active-zones${RESET}"
             ((CHECKS_PASSED++)) || true
         fi
     fi
@@ -520,8 +578,8 @@ fix_basic_utils() {
 fix_node() {
     if command -v node &>/dev/null; then
         local node_version
-        node_version=$(node -v | sed 's/^v//' | cut -d'.' -f1)
-        if [ -n "$node_version" ] && [ "$node_version" -ge "$MIN_NODE_VERSION" ]; then
+        node_version=$(node -v | sed 's/^v//')
+        if version_at_least "$node_version" "$MIN_NODE_VERSION"; then
             ok "Node.js $(node -v) is already installed."
             return
         fi
@@ -589,6 +647,59 @@ fix_eas() {
     ok "EAS CLI installed."
 }
 
+detect_shell_profile() {
+    local shell_name
+    shell_name=$(basename "${SHELL:-bash}")
+    case "$shell_name" in
+        bash) SHELL_PROFILE="$HOME/.bashrc"; SHELL_RELOAD_HINT="source ~/.bashrc" ;;
+        zsh)  SHELL_PROFILE="$HOME/.zshrc"; SHELL_RELOAD_HINT="source ~/.zshrc" ;;
+        fish) SHELL_PROFILE="$HOME/.config/fish/config.fish"; SHELL_RELOAD_HINT="source ~/.config/fish/config.fish" ;;
+        *)
+            warn "Unsupported login shell '$shell_name'; using ~/.bashrc for environment setup."
+            SHELL_PROFILE="$HOME/.bashrc"
+            SHELL_RELOAD_HINT="source ~/.bashrc"
+            ;;
+    esac
+    SHELL_PROFILE_TYPE="$shell_name"
+}
+
+# Replace only the block owned by this tool, preserving all user configuration.
+configure_shell_profile() {
+    local java_home="$1" android_home="$2" cmdline_tools_bin="$3"
+    local profile_dir tmp_profile start_markers end_markers
+
+    [ -n "$java_home" ] && [ -n "$android_home" ] && [ -n "$cmdline_tools_bin" ] || return 0
+    detect_shell_profile
+    profile_dir=$(dirname "$SHELL_PROFILE")
+    mkdir -p "$profile_dir"
+    touch "$SHELL_PROFILE"
+    start_markers=$(grep -c '^# >>> expo-local-doctor >>>$' "$SHELL_PROFILE" || true)
+    end_markers=$(grep -c '^# <<< expo-local-doctor <<<$' "$SHELL_PROFILE" || true)
+    if [ "$start_markers" -ne "$end_markers" ] || [ "$start_markers" -gt 1 ]; then
+        fail "Refusing to update ${SHELL_PROFILE}: malformed expo-local-doctor configuration block."
+        info "Repair the '# >>> expo-local-doctor >>>' / '# <<< expo-local-doctor <<<' markers and run again."
+        return 1
+    fi
+    tmp_profile=$(mktemp "${SHELL_PROFILE}.XXXXXX")
+
+    awk '/^# >>> expo-local-doctor >>>$/ { skip=1; next } /^# <<< expo-local-doctor <<</ { skip=0; next } !skip { print }' "$SHELL_PROFILE" > "$tmp_profile"
+    {
+        echo "# >>> expo-local-doctor >>>"
+        if [ "$SHELL_PROFILE_TYPE" = "fish" ]; then
+            printf 'set -gx JAVA_HOME "%s"\n' "$java_home"
+            printf 'set -gx ANDROID_HOME "%s"\n' "$android_home"
+            printf 'fish_add_path -g "%s" "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools"\n' "$cmdline_tools_bin"
+        else
+            printf 'export JAVA_HOME="%s"\n' "$java_home"
+            printf 'export ANDROID_HOME="%s"\n' "$android_home"
+            printf 'export PATH="$PATH:$ANDROID_HOME/emulator:%s:$ANDROID_HOME/platform-tools"\n' "$cmdline_tools_bin"
+        fi
+        echo "# <<< expo-local-doctor <<<"
+    } >> "$tmp_profile"
+    mv "$tmp_profile" "$SHELL_PROFILE"
+    ok "Environment configuration updated in ${SHELL_PROFILE}."
+}
+
 fix_java() {
     local needs_install=0
     if ! command -v java &>/dev/null; then
@@ -614,26 +725,9 @@ fix_java() {
     local java_home_path
     java_home_path=$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")
 
-    # Set JAVA_HOME if not already configured
-    if ! grep -q "JAVA_HOME" ~/.bashrc 2>/dev/null; then
-        header "☕ Configuring JAVA_HOME..."
-
-        if [ -n "$java_home_path" ]; then
-            echo "export JAVA_HOME=${java_home_path}" >> ~/.bashrc
-            export JAVA_HOME="${java_home_path}"
-            ok "JAVA_HOME set to ${java_home_path}"
-        fi
-    else
-        # JAVA_HOME is present — make sure it isn't stale (e.g. after a JDK upgrade)
-        local configured_home
-        configured_home=$(grep -oP 'JAVA_HOME=\K[^\s"]+' ~/.bashrc 2>/dev/null | tail -1 || true)
-        if [ -n "$configured_home" ] && [ ! -d "$configured_home" ]; then
-            warn "JAVA_HOME in ~/.bashrc points to ${configured_home}, which no longer exists."
-            [ -n "$java_home_path" ] && info "Update it to: ${BOLD}export JAVA_HOME=${java_home_path}${RESET}"
-        else
-            ok "JAVA_HOME is already configured in ~/.bashrc"
-        fi
-    fi
+    RESOLVED_JAVA_HOME="$java_home_path"
+    export JAVA_HOME="$java_home_path"
+    ok "JAVA_HOME resolved to ${java_home_path}"
 }
 
 # Locate the cmdline-tools bin directory that contains sdkmanager.
@@ -671,6 +765,13 @@ fix_android_sdk() {
 
         if [ "$needs_update" -eq 0 ]; then
             ok "Android SDK is already configured with ${ANDROID_PLATFORM_VERSION} and build-tools ${ANDROID_BUILD_TOOLS_VERSION}."
+            export ANDROID_HOME="$sdk_dir"
+            if ANDROID_CMDLINE_TOOLS_BIN=$(find_cmdline_tools_bin "$sdk_dir"); then
+                export PATH="$PATH:$ANDROID_HOME/emulator:$ANDROID_CMDLINE_TOOLS_BIN:$ANDROID_HOME/platform-tools"
+            else
+                fail "sdkmanager not found under ${sdk_dir}/cmdline-tools."
+                exit 1
+            fi
             return
         fi
 
@@ -684,15 +785,8 @@ fix_android_sdk() {
             info "Reinstall the Android command-line tools, or unset ANDROID_HOME to let this script set them up."
             exit 1
         fi
+        ANDROID_CMDLINE_TOOLS_BIN="$cmdline_bin"
         export PATH="$PATH:$ANDROID_HOME/emulator:$cmdline_bin:$ANDROID_HOME/platform-tools"
-
-        if ! grep -q "ANDROID_HOME" ~/.bashrc 2>/dev/null; then
-            {
-                echo "export ANDROID_HOME=${sdk_dir}"
-                echo 'export PATH=$PATH:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools'
-            } >> ~/.bashrc
-            ok "ANDROID_HOME PATH entries added to ~/.bashrc"
-        fi
 
         info "Accepting Android SDK licenses..."
         yes | sdkmanager --licenses 2>/dev/null || true
@@ -724,15 +818,8 @@ fix_android_sdk() {
         mv "$sdk_dir/cmdline-tools/cmdline-tools" "$sdk_dir/cmdline-tools/latest"
     fi
 
-    # Write to ~/.bashrc if not already there
-    if ! grep -q "ANDROID_HOME" ~/.bashrc 2>/dev/null; then
-        {
-            echo "export ANDROID_HOME=${sdk_dir}"
-            echo 'export PATH=$PATH:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools'
-        } >> ~/.bashrc
-    fi
-
     export ANDROID_HOME="$sdk_dir"
+    ANDROID_CMDLINE_TOOLS_BIN="$ANDROID_HOME/cmdline-tools/latest/bin"
     export PATH="$PATH:$ANDROID_HOME/emulator:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools"
 
     info "Accepting Android SDK licenses..."
@@ -799,14 +886,36 @@ fix_firewall() {
     fi
 
     if [ "$firewalld_active" -eq 1 ]; then
-        if sudo -n firewall-cmd --list-ports 2>/dev/null | grep -q "8081/tcp"; then
-            ok "firewalld rule for port 8081/tcp is already active."
-        else
-            header "🛡️  Configuring firewalld for Expo Metro (Port 8081)..."
-            sudo firewall-cmd --add-port=8081/tcp --permanent
-            sudo firewall-cmd --reload
-            ok "firewalld port 8081/tcp allowed."
+        local zone zones changed=0
+        zones=$(sudo firewall-cmd --get-active-zones | parse_firewalld_active_zones)
+        if [ -z "$zones" ]; then
+            zones=$(sudo firewall-cmd --get-default-zone)
         fi
+
+        while IFS= read -r zone; do
+            [ -n "$zone" ] || continue
+            if sudo firewall-cmd --permanent --zone="$zone" --list-ports | grep -qw "8081/tcp"; then
+                ok "firewalld permanent rule for 8081/tcp already exists in zone '$zone'."
+            else
+                header "🛡️  Configuring firewalld zone '$zone' for Expo Metro (Port 8081)..."
+                sudo firewall-cmd --zone="$zone" --add-port=8081/tcp --permanent
+                changed=1
+            fi
+        done <<< "$zones"
+
+        if [ "$changed" -eq 1 ]; then
+            sudo firewall-cmd --reload
+        fi
+
+        while IFS= read -r zone; do
+            [ -n "$zone" ] || continue
+            if sudo firewall-cmd --zone="$zone" --list-ports | grep -qw "8081/tcp"; then
+                ok "firewalld zone '$zone' allows port 8081/tcp."
+            else
+                fail "firewalld zone '$zone' still does not allow port 8081/tcp after reload."
+                exit 1
+            fi
+        done <<< "$zones"
     fi
 }
 
@@ -852,7 +961,8 @@ ${BOLD}USAGE${RESET}
 ${BOLD}SDK DETECTION${RESET}
     By default, the tool detects your Expo SDK version from the nearest
     package.json. Use --sdk to override, e.g. for checking before creating
-    a project.
+    a project. An SDK absent from the version map exits with an error; it is
+    never silently checked against a different SDK.
 
 ${BOLD}WHAT GETS CHECKED${RESET}
     • Basic utilities    curl, git, unzip, wget, gcc, make
@@ -868,7 +978,7 @@ ${BOLD}WHAT GETS CHECKED${RESET}
     • Firewall           UFW / Firewalld status & Metro port 8081 accessibility
 
 ${BOLD}SUPPORTED SDKs${RESET}
-    50, 51, 52, 53, 54, 55, 56
+    50, 51, 52, 53, 54, 55, 56, 57
 
 ${BOLD}SUPPORTED DISTROS${RESET}
     • Debian / Ubuntu        (apt)
@@ -880,13 +990,13 @@ ${BOLD}EXAMPLES${RESET}
     ./expo-local-doctor
 
     # Check for a specific Expo SDK version
-    ./expo-local-doctor --sdk 55
+    ./expo-local-doctor --sdk 57
 
     # Auto-fix everything
     ./expo-local-doctor --fix
 
     # Auto-fix for a specific SDK version
-    ./expo-local-doctor --fix --sdk 56
+    ./expo-local-doctor --fix --sdk 57
 
     # Pipe-safe (colors auto-disabled)
     ./expo-local-doctor 2>&1 | tee doctor-report.txt
@@ -970,6 +1080,7 @@ main() {
         fix_eas
         fix_java
         fix_android_sdk
+        configure_shell_profile "$RESOLVED_JAVA_HOME" "$ANDROID_HOME" "$ANDROID_CMDLINE_TOOLS_BIN"
         fix_watchman
         fix_firewall
 
@@ -977,7 +1088,7 @@ main() {
         divider
         ok "${BOLD}All fixes applied successfully!${RESET}"
         echo ""
-        warn "Run ${BOLD}source ~/.bashrc${RESET} or restart your terminal for changes to take effect."
+        warn "Run ${BOLD}${SHELL_RELOAD_HINT:-source ~/.bashrc}${RESET} or restart your terminal for changes to take effect."
         info "Then run ${BOLD}$SCRIPT_NAME${RESET} to verify everything is set up."
     else
         # ── Check Mode ────────────────────────────────────────────
@@ -999,4 +1110,6 @@ main() {
     fi
 }
 
-main "$@"
+if [ "${EXPO_LOCAL_DOCTOR_NO_MAIN:-0}" != "1" ]; then
+    main "$@"
+fi

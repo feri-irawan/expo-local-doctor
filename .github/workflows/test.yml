@@ -1,0 +1,27 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shell syntax
+        run: bash -n expo-local-doctor tests/test.sh
+      - name: Run portable test harness
+        run: bash tests/test.sh
+
+  fedora:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run harness in Fedora
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/workspace:ro" \
+            --workdir /workspace \
+            fedora:latest \
+            bash -lc 'dnf -y install bash coreutils findutils gawk grep sed && bash -n expo-local-doctor tests/test.sh && bash tests/test.sh'

@@ -14,7 +14,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION="1.3.1"
+VERSION="1.3.2"
 SCRIPT_NAME="expo-local-doctor"
 
 # Android command-line tools download version (latest stable)
@@ -399,7 +399,29 @@ check_java() {
         fi
     fi
 
+    if ! command -v javac &>/dev/null; then
+        fail "Java compiler (javac) is not installed. Install a full JDK, not a Java runtime only."
+        MISSING=1
+        ((CHECKS_FAILED++)) || true
+    else
+        local javac_version
+        javac_version=$(javac -version 2>&1 | grep -oP '\d+(?:\.\d+){0,2}' | head -1 || true)
+        if ! version_at_least "${javac_version:-0}" "$MIN_JDK_VERSION"; then
+            fail "Java compiler version ${javac_version:-unknown} is installed, but version ${MIN_JDK_VERSION}+ is required."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        else
+            ok "Java compiler is installed: ${DIM}version $javac_version${RESET}"
+            ((CHECKS_PASSED++)) || true
+        fi
+    fi
+
     check_env_dir JAVA_HOME || true
+    if [ -n "${JAVA_HOME:-}" ] && [ -d "${JAVA_HOME:-}" ] && [ ! -x "$JAVA_HOME/bin/javac" ]; then
+        fail "JAVA_HOME points to '$JAVA_HOME', but it does not contain bin/javac."
+        MISSING=1
+        ((CHECKS_FAILED++)) || true
+    fi
 }
 
 check_android_sdk() {
@@ -733,24 +755,40 @@ configure_shell_profile() {
 }
 
 fix_java() {
-    local needs_install=0
+    local needs_install=0 java_version="" target_jdk_version="$MIN_JDK_VERSION"
     if ! command -v java &>/dev/null; then
         needs_install=1
     else
-        local java_version
         java_version=$(java -version 2>&1 | head -n1 | grep -oP '(?<=")\d+' | head -1 || true)
         if [ -n "$java_version" ] && [ "$java_version" -lt "$MIN_JDK_VERSION" ]; then
             info "Java $java_version is installed but version ${MIN_JDK_VERSION} is required. Installing..."
             needs_install=1
         else
-            ok "Java is already installed: ${DIM}version ${java_version:-unknown}${RESET}"
+            [ -n "$java_version" ] && target_jdk_version="$java_version"
+        fi
+    fi
+
+    if ! command -v javac &>/dev/null; then
+        info "Java compiler (javac) is missing. Installing the JDK development package..."
+        needs_install=1
+    else
+        local javac_version
+        javac_version=$(javac -version 2>&1 | grep -oP '\d+' | head -1 || true)
+        if ! version_at_least "${javac_version:-0}" "$MIN_JDK_VERSION"; then
+            info "Java compiler $javac_version is installed but version ${MIN_JDK_VERSION} is required. Installing..."
+            needs_install=1
         fi
     fi
 
     if [ "$needs_install" -eq 1 ]; then
-        header "☕ Installing OpenJDK ${MIN_JDK_VERSION}..."
-        install_pkg "openjdk-${MIN_JDK_VERSION}-jdk" "java-${MIN_JDK_VERSION}-openjdk-devel" "jdk${MIN_JDK_VERSION}-openjdk"
-        ok "OpenJDK ${MIN_JDK_VERSION} installed."
+        header "☕ Installing OpenJDK ${target_jdk_version} development package..."
+        install_pkg "openjdk-${target_jdk_version}-jdk" "java-${target_jdk_version}-openjdk-devel" "jdk${target_jdk_version}-openjdk"
+        ok "OpenJDK ${target_jdk_version} development package installed."
+    fi
+
+    if ! command -v javac &>/dev/null; then
+        fail "javac is still unavailable after JDK installation."
+        exit 1
     fi
 
     # Resolve the JDK home from the active java binary
@@ -1005,7 +1043,7 @@ ${BOLD}WHAT GETS CHECKED${RESET}
     • npm                Package manager (always required)
     • yarn/pnpm/bun      Checked if detected as the project's package manager
     • EAS CLI            Expo Application Services
-    • Java JDK           OpenJDK (version based on Expo SDK)
+    • Java JDK           OpenJDK plus javac compiler (version based on Expo SDK)
     • JAVA_HOME          Environment variable
     • Android SDK        ANDROID_HOME, cmdline-tools, platform-tools,
                          build-tools, platforms (versions per SDK)

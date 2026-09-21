@@ -110,9 +110,10 @@ printf '%s\n' '#!/usr/bin/env bash' \
 printf '%s\n' '#!/usr/bin/env bash' 'printf "v%s\\n" "${NODE_FIXTURE:-22.13.0}"' > "$FAKE_BIN/node"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$FAKE_BIN/npm"
 printf '%s\n' '#!/usr/bin/env bash' 'echo '\''openjdk version "17.0.15"'\'' >&2' > "$FAKE_BIN/java"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "javac ${JAVAC_FIXTURE:-17.0.15}" >&2' > "$FAKE_BIN/javac"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$FAKE_BIN/adb"
 chmod +x "$FAKE_BIN/systemctl" "$FAKE_BIN/sudo" "$FAKE_BIN/firewall-cmd"
-chmod +x "$FAKE_BIN/node" "$FAKE_BIN/npm" "$FAKE_BIN/java" "$FAKE_BIN/adb"
+chmod +x "$FAKE_BIN/node" "$FAKE_BIN/npm" "$FAKE_BIN/java" "$FAKE_BIN/javac" "$FAKE_BIN/adb"
 
 node_old_output=$(PATH="$FAKE_BIN:$PATH" NODE_FIXTURE="22.0.0" MIN_NODE_VERSION="22.13.0" DETECTED_SDK_VERSION="57" check_node)
 assert_contains "$node_old_output" "v22.13.0+ is required" "Node check rejects a version below the patch minimum"
@@ -126,9 +127,20 @@ watchman_fix_sdk57_output=$(PATH="$FAKE_BIN" DETECTED_SDK_VERSION="57" fix_watch
 assert_contains "$watchman_fix_sdk57_output" "skipping installation" "SDK 57 fix mode skips Watchman installation"
 
 FAKE_JAVA_HOME="$TEMP_DIR/fake-jdk"
-mkdir -p "$FAKE_JAVA_HOME"
+mkdir -p "$FAKE_JAVA_HOME/bin"
+ln -s "$FAKE_BIN/javac" "$FAKE_JAVA_HOME/bin/javac"
 java_output=$(PATH="$FAKE_BIN:$PATH" JAVA_HOME="$FAKE_JAVA_HOME" MIN_JDK_VERSION="17" check_java)
 assert_contains "$java_output" "Java is installed: version 17" "Java check uses an isolated Java executable"
+assert_contains "$java_output" "Java compiler is installed: version 17.0.15" "Java check requires an isolated javac compiler"
+
+JAVA_ONLY_BIN="$TEMP_DIR/java-only-bin"
+mkdir -p "$JAVA_ONLY_BIN" "$TEMP_DIR/fake-jre"
+printf '%s\n' '#!/usr/bin/env bash' 'echo '\''openjdk version "17.0.15"'\'' >&2' > "$JAVA_ONLY_BIN/java"
+chmod +x "$JAVA_ONLY_BIN/java"
+ln -s /usr/bin/grep "$JAVA_ONLY_BIN/grep"
+ln -s /usr/bin/head "$JAVA_ONLY_BIN/head"
+java_runtime_only_output=$(PATH="$JAVA_ONLY_BIN" JAVA_HOME="$TEMP_DIR/fake-jre" MIN_JDK_VERSION="17" check_java)
+assert_contains "$java_runtime_only_output" "Java compiler (javac) is not installed" "Java runtime-only installation fails readiness"
 
 FAKE_ANDROID_HOME="$TEMP_DIR/fake-android-sdk"
 mkdir -p "$FAKE_ANDROID_HOME/cmdline-tools/latest/bin" "$FAKE_ANDROID_HOME/platform-tools" \
@@ -166,7 +178,7 @@ assert_equals "$noop_status" "2" "Unsupported SDK --fix exits before fixes"
 help_output=$("$SCRIPT" --help)
 version_output=$("$SCRIPT" --version)
 assert_contains "$help_output" "50, 51, 52, 53, 54, 55, 56, 57" "Help lists SDK 57"
-assert_equals "$version_output" "expo-local-doctor v1.3.1" "Version smoke test"
+assert_equals "$version_output" "expo-local-doctor v1.3.2" "Version smoke test"
 
 if [ "$FAIL" -gt 0 ]; then
     printf '%s test(s) failed; %s passed\n' "$FAIL" "$PASS" >&2

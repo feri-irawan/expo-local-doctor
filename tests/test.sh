@@ -96,7 +96,7 @@ assert_contains "$(<"$malformed_home/.bashrc")" "USER_SETTING=preserved" "Malfor
 FAKE_BIN="$TEMP_DIR/fake-bin"
 mkdir -p "$FAKE_BIN"
 
-printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$FAKE_BIN/systemctl"
+printf '%s\n' '#!/usr/bin/env bash' '[ "${3:-}" = "firewalld" ] && exit 0' 'exit 1' > "$FAKE_BIN/systemctl"
 printf '%s\n' '#!/usr/bin/env bash' '[ "${1:-}" = "-n" ] && shift' 'exec "$@"' > "$FAKE_BIN/sudo"
 printf '%s\n' '#!/usr/bin/env bash' \
     '[ -n "${FIREWALL_LOG:-}" ] && printf "%s\\n" "$*" >> "$FIREWALL_LOG"' \

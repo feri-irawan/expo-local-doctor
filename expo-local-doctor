@@ -14,7 +14,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION="1.3.2"
+VERSION="1.3.3"
 SCRIPT_NAME="expo-local-doctor"
 
 # Android command-line tools download version (latest stable)
@@ -22,18 +22,18 @@ ANDROID_CMDLINE_TOOLS_VERSION="11076708"
 
 # ---------------------------------------------------------------------------
 # Expo SDK → Dependency version mapping table
-# Format: sdk_version|min_node|min_jdk|compile_sdk|build_tools
+# Format: sdk_version|min_node|min_jdk|compile_sdk|build_tools|ndk
 # Source: https://docs.expo.dev/versions/latest/
 # ---------------------------------------------------------------------------
 SDK_VERSION_MAP=(
-    "57|22.13.0|17|36|36.0.0"
-    "56|20.19.0|17|36|36.0.0"
-    "55|20.19.4|17|36|36.0.0"
-    "54|20.19.0|17|36|36.0.0"
-    "53|18.18.0|17|35|35.0.0"
-    "52|18.18.0|17|35|35.0.0"
-    "51|18.18.0|17|34|34.0.0"
-    "50|18.18.0|17|34|34.0.0"
+    "57|22.13.0|17|36|36.0.0|27.1.12297006"
+    "56|20.19.0|17|36|36.0.0|27.1.12297006"
+    "55|20.19.4|17|36|36.0.0|27.1.12297006"
+    "54|20.19.0|17|36|36.0.0|27.1.12297006"
+    "53|18.18.0|17|35|35.0.0|26.1.10909125"
+    "52|18.18.0|17|35|35.0.0|26.1.10909125"
+    "51|18.18.0|17|34|34.0.0|26.1.10909125"
+    "50|18.18.0|17|34|34.0.0|25.1.8937393"
 )
 
 # Default fallback (latest known SDK)
@@ -44,6 +44,7 @@ MIN_NODE_VERSION=""
 MIN_JDK_VERSION=""
 ANDROID_PLATFORM_VERSION=""
 ANDROID_BUILD_TOOLS_VERSION=""
+ANDROID_NDK_VERSION=""
 DETECTED_SDK_VERSION=""
 SDK_SOURCE=""
 RESOLVED_JAVA_HOME=""
@@ -132,17 +133,19 @@ detect_arch() {
 # ---------------------------------------------------------------------------
 
 # Look up version requirements for a given SDK version.
-# Sets: MIN_NODE_VERSION, MIN_JDK_VERSION, ANDROID_PLATFORM_VERSION, ANDROID_BUILD_TOOLS_VERSION
+# Sets: MIN_NODE_VERSION, MIN_JDK_VERSION, ANDROID_PLATFORM_VERSION,
+# ANDROID_BUILD_TOOLS_VERSION, ANDROID_NDK_VERSION
 resolve_sdk_versions() {
     local sdk="$1"
-    local entry entry_sdk min_node min_jdk compile_sdk build_tools
+    local entry entry_sdk min_node min_jdk compile_sdk build_tools ndk
     for entry in "${SDK_VERSION_MAP[@]}"; do
-        IFS='|' read -r entry_sdk min_node min_jdk compile_sdk build_tools <<< "$entry"
+        IFS='|' read -r entry_sdk min_node min_jdk compile_sdk build_tools ndk <<< "$entry"
         if [ "$entry_sdk" = "$sdk" ]; then
             MIN_NODE_VERSION="$min_node"
             MIN_JDK_VERSION="$min_jdk"
             ANDROID_PLATFORM_VERSION="android-${compile_sdk}"
             ANDROID_BUILD_TOOLS_VERSION="$build_tools"
+            ANDROID_NDK_VERSION="$ndk"
             DETECTED_SDK_VERSION="$sdk"
             return 0
         fi
@@ -424,8 +427,38 @@ check_java() {
     fi
 }
 
+ndk_revision() {
+    local ndk_dir="$1"
+    [ -f "$ndk_dir/source.properties" ] || return 1
+    awk -F ' = ' '$1 == "Pkg.Revision" { print $2; exit }' "$ndk_dir/source.properties"
+}
+
+list_incomplete_ndk_dirs() {
+    local ndk_root="$1" candidate
+    [ -d "$ndk_root" ] || return 0
+    (
+        shopt -s nullglob
+        for candidate in "$ndk_root"/*; do
+            [ -d "$candidate" ] && [ ! -f "$candidate/source.properties" ] && basename "$candidate"
+        done
+    ) | sort | awk 'NR == 1 { result = $0; next } { result = result ", " $0 } END { printf "%s", result }'
+}
+
+clean_incomplete_ndk_dirs() {
+    local ndk_root="$1" candidate
+    [ -d "$ndk_root" ] || return 0
+    (
+        shopt -s nullglob
+        for candidate in "$ndk_root"/*; do
+            [ -d "$candidate" ] && [ ! -f "$candidate/source.properties" ] || continue
+            warn "Removing incomplete Android NDK installation: $candidate"
+            rm -rf -- "$candidate"
+        done
+    )
+}
+
 check_android_sdk() {
-    header "🤖 Android SDK (${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION})"
+    header "🤖 Android SDK (${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}, NDK ${ANDROID_NDK_VERSION})"
 
     check_env_dir ANDROID_HOME || true
 
@@ -477,6 +510,29 @@ check_android_sdk() {
             fail "No Android platforms installed (need ${ANDROID_PLATFORM_VERSION})."
             MISSING=1
             ((CHECKS_FAILED++)) || true
+        fi
+
+        local required_ndk_dir="$sdk_dir/ndk/${ANDROID_NDK_VERSION}"
+        local installed_ndk_revision
+        installed_ndk_revision=$(ndk_revision "$required_ndk_dir" || true)
+        if [ "$installed_ndk_revision" = "$ANDROID_NDK_VERSION" ]; then
+            ok "NDK ${ANDROID_NDK_VERSION} found."
+            ((CHECKS_PASSED++)) || true
+        elif [ -d "$required_ndk_dir" ]; then
+            fail "NDK ${ANDROID_NDK_VERSION} is incomplete or reports version ${installed_ndk_revision:-unknown}."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        else
+            fail "NDK ${ANDROID_NDK_VERSION} is missing."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        fi
+
+        local incomplete_ndks
+        incomplete_ndks=$(list_incomplete_ndk_dirs "$sdk_dir/ndk")
+        if [ -n "$incomplete_ndks" ]; then
+            warn "Incomplete NDK installations detected: $incomplete_ndks. Run --fix to remove them."
+            ((CHECKS_WARNED++)) || true
         fi
 
         if command -v adb &>/dev/null; then
@@ -824,6 +880,7 @@ fix_android_sdk() {
     if [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}/cmdline-tools" ]; then
         # SDK exists — check whether the required platform and build-tools are present
         local needs_update=0
+        clean_incomplete_ndk_dirs "$sdk_dir/ndk"
         if [ ! -d "${ANDROID_HOME}/platforms/${ANDROID_PLATFORM_VERSION}" ]; then
             info "Missing ${ANDROID_PLATFORM_VERSION} — will install."
             needs_update=1
@@ -832,9 +889,13 @@ fix_android_sdk() {
             info "Missing build-tools ${ANDROID_BUILD_TOOLS_VERSION} — will install."
             needs_update=1
         fi
+        if [ "$(ndk_revision "$sdk_dir/ndk/${ANDROID_NDK_VERSION}" || true)" != "$ANDROID_NDK_VERSION" ]; then
+            info "Missing or incomplete NDK ${ANDROID_NDK_VERSION} — will install."
+            needs_update=1
+        fi
 
         if [ "$needs_update" -eq 0 ]; then
-            ok "Android SDK is already configured with ${ANDROID_PLATFORM_VERSION} and build-tools ${ANDROID_BUILD_TOOLS_VERSION}."
+            ok "Android SDK is already configured with ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}, and NDK ${ANDROID_NDK_VERSION}."
             export ANDROID_HOME="$sdk_dir"
             if ANDROID_CMDLINE_TOOLS_BIN=$(find_cmdline_tools_bin "$sdk_dir"); then
                 export PATH="$PATH:$ANDROID_HOME/emulator:$ANDROID_CMDLINE_TOOLS_BIN:$ANDROID_HOME/platform-tools"
@@ -861,8 +922,8 @@ fix_android_sdk() {
         info "Accepting Android SDK licenses..."
         yes | sdkmanager --licenses 2>/dev/null || true
 
-        info "Installing ${ANDROID_PLATFORM_VERSION} and build-tools ${ANDROID_BUILD_TOOLS_VERSION}..."
-        sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM_VERSION}" "build-tools;${ANDROID_BUILD_TOOLS_VERSION}"
+        info "Installing ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}, and NDK ${ANDROID_NDK_VERSION}..."
+        sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM_VERSION}" "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" "ndk;${ANDROID_NDK_VERSION}"
 
         ok "Android SDK updated at ${sdk_dir}"
         return
@@ -895,8 +956,8 @@ fix_android_sdk() {
     info "Accepting Android SDK licenses..."
     yes | sdkmanager --licenses 2>/dev/null || true
 
-    info "Installing platform-tools, ${ANDROID_PLATFORM_VERSION}, and build-tools ${ANDROID_BUILD_TOOLS_VERSION}..."
-    sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM_VERSION}" "build-tools;${ANDROID_BUILD_TOOLS_VERSION}"
+    info "Installing platform-tools, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}, and NDK ${ANDROID_NDK_VERSION}..."
+    sdkmanager "platform-tools" "platforms;${ANDROID_PLATFORM_VERSION}" "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" "ndk;${ANDROID_NDK_VERSION}"
 
     ok "Android SDK installed at ${sdk_dir}"
 }
@@ -1046,7 +1107,7 @@ ${BOLD}WHAT GETS CHECKED${RESET}
     • Java JDK           OpenJDK plus javac compiler (version based on Expo SDK)
     • JAVA_HOME          Environment variable
     • Android SDK        ANDROID_HOME, cmdline-tools, platform-tools,
-                         build-tools, platforms (versions per SDK)
+                         build-tools, platforms, NDK (versions per SDK)
     • Watchman           Recommended for Expo SDK 55 and earlier
     • Firewall           UFW / Firewalld status & Metro port 8081 accessibility
 
@@ -1142,7 +1203,7 @@ main() {
         echo -e "${BOLD}${CYAN}🛠️  $SCRIPT_NAME v$VERSION — Fix Mode${RESET}"
         info "Detected: ${BOLD}$PKG_MANAGER${RESET} on ${BOLD}$ARCH${RESET}"
         info "Expo SDK: ${BOLD}$DETECTED_SDK_VERSION${RESET} ${DIM}($SDK_SOURCE)${RESET}"
-        info "Requirements: ${BOLD}Node ≥${MIN_NODE_VERSION}, JDK ${MIN_JDK_VERSION}, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}${RESET}"
+        info "Requirements: ${BOLD}Node ≥${MIN_NODE_VERSION}, JDK ${MIN_JDK_VERSION}, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}, NDK ${ANDROID_NDK_VERSION}${RESET}"
         [ -n "$PROJECT_PKG_MANAGER" ] && info "Package manager: ${BOLD}$PROJECT_PKG_MANAGER${RESET} ${DIM}(detected from project)${RESET}"
         divider
 
@@ -1168,7 +1229,7 @@ main() {
         echo -e "${BOLD}${CYAN}🔍 $SCRIPT_NAME v$VERSION — Checking system readiness...${RESET}"
         info "Detected: ${BOLD}$PKG_MANAGER${RESET} on ${BOLD}$ARCH${RESET}"
         info "Expo SDK: ${BOLD}$DETECTED_SDK_VERSION${RESET} ${DIM}($SDK_SOURCE)${RESET}"
-        info "Requirements: ${BOLD}Node ≥${MIN_NODE_VERSION}, JDK ${MIN_JDK_VERSION}, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}${RESET}"
+        info "Requirements: ${BOLD}Node ≥${MIN_NODE_VERSION}, JDK ${MIN_JDK_VERSION}, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}, NDK ${ANDROID_NDK_VERSION}${RESET}"
         [ -n "$PROJECT_PKG_MANAGER" ] && info "Package manager: ${BOLD}$PROJECT_PKG_MANAGER${RESET} ${DIM}(detected from project)${RESET}"
         divider
 

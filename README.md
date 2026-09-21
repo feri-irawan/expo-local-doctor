@@ -64,10 +64,10 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 
 **Example output:**
 ```
-🔍 expo-local-doctor v1.3.2 — Checking system readiness...
+🔍 expo-local-doctor v1.3.3 — Checking system readiness...
 ℹ  Detected: apt on x86_64
 ℹ  Expo SDK: 57 (from ./package.json)
-ℹ  Requirements: Node ≥22.13.0, JDK 17, android-36, build-tools 36.0.0
+ℹ  Requirements: Node ≥22.13.0, JDK 17, android-36, build-tools 36.0.0, NDK 27.1.12297006
 ────────────────────────────────────────────────────────
 
 📦 Basic Utilities & Build Tools
@@ -88,12 +88,13 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 ✅ Java is installed: version 17
 ✅ JAVA_HOME is set: /usr/lib/jvm/java-17-openjdk-amd64
 
-🤖 Android SDK (android-36, build-tools 36.0.0)
+🤖 Android SDK (android-36, build-tools 36.0.0, NDK 27.1.12297006)
 ✅ ANDROID_HOME is set: /home/user/Android/Sdk
 ✅ cmdline-tools directory found.
 ✅ platform-tools directory found.
 ✅ build-tools 36.0.0 found.
 ✅ android-36 platform found.
+✅ NDK 27.1.12297006 found.
 
 👀 Watchman
 ✅ Watchman is installed.
@@ -148,7 +149,7 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 | **EAS CLI** | Expo Application Services CLI |
 | **Java JDK** | OpenJDK 17+ with the `javac` compiler (a runtime-only Java installation does not pass) |
 | **JAVA_HOME** | Environment variable pointing to JDK; `--fix` writes an idempotent block to the active Bash, Zsh, or Fish profile |
-| **Android SDK** | `ANDROID_HOME`, `cmdline-tools`, `platform-tools`, exact `build-tools` and platform per SDK |
+| **Android SDK** | `ANDROID_HOME`, `cmdline-tools`, `platform-tools`, exact `build-tools`, platform, and NDK per SDK; incomplete NDK installs are detected and removed by `--fix` |
 | **adb in PATH** | Warns if `$ANDROID_HOME/platform-tools` is not on `$PATH` |
 | **Watchman** | Recommended for Metro on Expo SDK 55 and earlier; not required on SDK 56+ |
 | **Firewall** | UFW / Firewalld status & Metro port `8081` accessibility (active default Firewalld zone; container zones are skipped) |
@@ -167,7 +168,7 @@ If a project uses an Expo SDK not yet in the tool's version map, the command exi
 | Node.js LTS | [NVM](https://github.com/nvm-sh/nvm) |
 | EAS CLI | `npm install -g eas-cli` |
 | OpenJDK development package | System package manager; installs the active compatible JDK's compiler when only a runtime is present |
-| Android SDK | Official Google command-line tools |
+| Android SDK + NDK | Official Google command-line tools and the NDK version required by the target Expo SDK |
 | Watchman | System package manager when needed for Expo SDK 55 or earlier |
 | Firewall | `sudo ufw allow 8081/tcp comment 'Expo'` or `firewall-cmd` |
 
@@ -205,7 +206,7 @@ bash tests/test.sh
 ### Supporting a new Expo SDK
 
 The per-SDK requirements live in the `SDK_VERSION_MAP` table near the top of the
-`expo-local-doctor` script. Each row is `sdk|min_node|min_jdk|compile_sdk|build_tools`.
+`expo-local-doctor` script. Each row is `sdk|min_node|min_jdk|compile_sdk|build_tools|ndk`.
 `min_node` uses an exact semantic version. To add a new SDK, append a row (cross-checked against the
 [Expo SDK docs](https://docs.expo.dev/versions/latest/)) and bump
 `DEFAULT_SDK_VERSION` to the newest entry.

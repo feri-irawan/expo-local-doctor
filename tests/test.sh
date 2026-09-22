@@ -22,8 +22,10 @@ assert_equals() {
 }
 
 export EXPO_LOCAL_DOCTOR_NO_MAIN=1
+export TERM=dumb
 # shellcheck source=../expo-local-doctor
 source "$SCRIPT"
+RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' DIM='' RESET=''
 
 version_at_least "22.13.0" "22.13.0" && test_pass "Node version exactly at SDK 57 minimum passes" || test_fail "Node version exactly at SDK 57 minimum passes"
 if version_at_least "22.0.0" "22.13.0"; then test_fail "Node below SDK 57 minimum fails"; else test_pass "Node below SDK 57 minimum fails"; fi
@@ -87,6 +89,16 @@ for shell_name in bash zsh fish; do
     assert_contains "$(<"$profile")" "cmdline-tools/12.0/bin" "$shell_name profile preserves versioned command-line tools path"
 done
 
+symlink_home="$TEMP_DIR/home-symlink"
+mkdir -p "$symlink_home/dotfiles"
+target_file="$symlink_home/dotfiles/bashrc"
+printf '%s\n' 'export USER_SETTING=preserved' > "$target_file"
+ln -s "$target_file" "$symlink_home/.bashrc"
+HOME="$symlink_home" SHELL="/bin/bash" configure_shell_profile "/tmp/jdk" "/tmp/android" "/tmp/android/cmdline-tools/latest/bin"
+[ -L "$symlink_home/.bashrc" ] && test_pass "configure_shell_profile preserves symbolic links" || test_fail "configure_shell_profile preserves symbolic links"
+assert_contains "$(<"$target_file")" "export JAVA_HOME=\"/tmp/jdk\"" "configure_shell_profile writes through symlinks to target"
+
+
 malformed_home="$TEMP_DIR/home-malformed"
 mkdir -p "$malformed_home"
 printf '%s\n%s\n' 'export USER_SETTING=preserved' '# >>> expo-local-doctor >>>' > "$malformed_home/.bashrc"
@@ -133,9 +145,72 @@ assert_contains "$watchman_fix_sdk57_output" "skipping installation" "SDK 57 fix
 FAKE_JAVA_HOME="$TEMP_DIR/fake-jdk"
 mkdir -p "$FAKE_JAVA_HOME/bin"
 ln -s "$FAKE_BIN/javac" "$FAKE_JAVA_HOME/bin/javac"
+ln -s "$FAKE_BIN/java" "$FAKE_JAVA_HOME/bin/java"
 java_output=$(PATH="$FAKE_BIN:$PATH" JAVA_HOME="$FAKE_JAVA_HOME" MIN_JDK_VERSION="17" check_java)
 assert_contains "$java_output" "Java is installed: version 17" "Java check uses an isolated Java executable"
 assert_contains "$java_output" "Java compiler is installed: version 17.0.15" "Java check requires an isolated javac compiler"
+
+FAKE_JAVA_NO_JAVA="$TEMP_DIR/fake-jdk-no-java"
+mkdir -p "$FAKE_JAVA_NO_JAVA/bin"
+ln -s "$FAKE_BIN/javac" "$FAKE_JAVA_NO_JAVA/bin/javac"
+java_no_java_output=$(PATH="$FAKE_BIN:$PATH" JAVA_HOME="$FAKE_JAVA_NO_JAVA" MIN_JDK_VERSION="17" MAX_JDK_VERSION="21" check_java)
+assert_contains "$java_no_java_output" "JAVA_HOME points to '$FAKE_JAVA_NO_JAVA', but it does not contain bin/java." "Java check fails when JAVA_HOME lacks bin/java"
+
+JAVA_HIGH_BIN="$TEMP_DIR/java-high-bin"
+mkdir -p "$JAVA_HIGH_BIN"
+printf '%s\n' '#!/usr/bin/env bash' 'echo '\''openjdk version "25.0.4.1"'\'' >&2' > "$JAVA_HIGH_BIN/java"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "javac 25.0.4.1" >&2' > "$JAVA_HIGH_BIN/javac"
+chmod +x "$JAVA_HIGH_BIN/java" "$JAVA_HIGH_BIN/javac"
+java_high_output=$(PATH="$JAVA_HIGH_BIN:$PATH" JAVA_HOME="" MIN_JDK_VERSION="17" MAX_JDK_VERSION="21" check_java)
+assert_contains "$java_high_output" "Java 25 is installed, but version 17-21 is required" "Java check rejects versions above maximum supported JDK"
+assert_contains "$java_high_output" "Java compiler version 25.0.4 is installed, but version 17-21 is required" "Java check rejects javac versions above maximum supported JDK"
+
+JAVA_11_BIN="$TEMP_DIR/java-11-bin"
+mkdir -p "$JAVA_11_BIN"
+printf '%s\n' '#!/usr/bin/env bash' 'echo '\''openjdk version "11.0.22"'\'' >&2' > "$JAVA_11_BIN/java"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "javac 11.0.22" >&2' > "$JAVA_11_BIN/javac"
+chmod +x "$JAVA_11_BIN/java" "$JAVA_11_BIN/javac"
+java_11_output=$(PATH="$JAVA_11_BIN:$PATH" JAVA_HOME="" MIN_JDK_VERSION="17" MAX_JDK_VERSION="21" check_java)
+assert_contains "$java_11_output" "Java 11 is installed, but version 17-21 is required" "Java check rejects versions below minimum supported JDK"
+assert_contains "$java_11_output" "Java compiler version 11.0.22 is installed, but version 17-21 is required" "Java check rejects javac versions below minimum supported JDK"
+
+JAVA_OPTS_BIN="$TEMP_DIR/java-opts-bin"
+mkdir -p "$JAVA_OPTS_BIN"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "Picked up JAVA_TOOL_OPTIONS: -Xmx2048m -Dfile.encoding=UTF-8" >&2' 'echo '\''openjdk version "17.0.15"'\'' >&2' > "$JAVA_OPTS_BIN/java"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "Picked up JAVA_TOOL_OPTIONS: -Xmx2048m" >&2' 'echo "javac 17.0.15" >&2' > "$JAVA_OPTS_BIN/javac"
+chmod +x "$JAVA_OPTS_BIN/java" "$JAVA_OPTS_BIN/javac"
+java_opts_output=$(PATH="$JAVA_OPTS_BIN:$PATH" JAVA_HOME="" MIN_JDK_VERSION="17" MAX_JDK_VERSION="21" check_java)
+assert_contains "$java_opts_output" "Java is installed: version 17" "Java check extracts version despite JAVA_TOOL_OPTIONS noise"
+assert_contains "$java_opts_output" "Java compiler is installed: version 17.0.15" "Java check extracts javac version despite JAVA_TOOL_OPTIONS with numbers"
+
+JAVA_21_BIN="$TEMP_DIR/java-21-bin"
+mkdir -p "$JAVA_21_BIN"
+printf '%s\n' '#!/usr/bin/env bash' 'echo '\''openjdk version "21.0.6"'\'' >&2' > "$JAVA_21_BIN/java"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "javac 21.0.6" >&2' > "$JAVA_21_BIN/javac"
+chmod +x "$JAVA_21_BIN/java" "$JAVA_21_BIN/javac"
+java_21_output=$(PATH="$JAVA_21_BIN:$PATH" JAVA_HOME="" MIN_JDK_VERSION="17" MAX_JDK_VERSION="21" check_java)
+assert_contains "$java_21_output" "Java is installed: version 21" "Java check accepts JDK 21 LTS"
+assert_contains "$java_21_output" "Java compiler is installed: version 21.0.6" "Java check accepts javac 21 LTS"
+
+FAKE_JAVA25_HOME="$TEMP_DIR/fake-java25-home"
+mkdir -p "$FAKE_JAVA25_HOME/bin"
+ln -s "$JAVA_HIGH_BIN/javac" "$FAKE_JAVA25_HOME/bin/javac"
+ln -s "$JAVA_HIGH_BIN/java" "$FAKE_JAVA25_HOME/bin/java"
+java_home_bad_output=$(PATH="$FAKE_BIN:$PATH" JAVA_HOME="$FAKE_JAVA25_HOME" MIN_JDK_VERSION="17" MAX_JDK_VERSION="21" check_java)
+assert_contains "$java_home_bad_output" "JAVA_HOME points to '$FAKE_JAVA25_HOME' (version 25), but version 17-21 is required" "Java check rejects JAVA_HOME with incompatible version"
+
+DISCOVERY_DIR="$TEMP_DIR/mock-discovery"
+mkdir -p "$DISCOVERY_DIR/temurin-17-jdk/bin" "$DISCOVERY_DIR/java-25-openjdk/bin"
+printf '%s\n' '#!/usr/bin/env bash' 'echo '\''openjdk version "17.0.14"'\'' >&2' > "$DISCOVERY_DIR/temurin-17-jdk/bin/java"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "javac 17.0.14" >&2' > "$DISCOVERY_DIR/temurin-17-jdk/bin/javac"
+printf '%s\n' '#!/usr/bin/env bash' 'echo '\''openjdk version "25.0.4.1"'\'' >&2' > "$DISCOVERY_DIR/java-25-openjdk/bin/java"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "javac 25.0.4.1" >&2' > "$DISCOVERY_DIR/java-25-openjdk/bin/javac"
+chmod +x "$DISCOVERY_DIR/temurin-17-jdk/bin/java" "$DISCOVERY_DIR/temurin-17-jdk/bin/javac" \
+         "$DISCOVERY_DIR/java-25-openjdk/bin/java" "$DISCOVERY_DIR/java-25-openjdk/bin/javac"
+found_jdk_val=$(JAVA_HOME="$DISCOVERY_DIR/temurin-17-jdk" MIN_JDK_VERSION="17" MAX_JDK_VERSION="21" find_compatible_jdk_home)
+assert_equals "$found_jdk_val" "$DISCOVERY_DIR/temurin-17-jdk" "find_compatible_jdk_home validates compatible JAVA_HOME"
+found_active_val=$(JAVA_HOME="" PATH="$DISCOVERY_DIR/temurin-17-jdk/bin:$PATH" MIN_JDK_VERSION="17" MAX_JDK_VERSION="21" find_compatible_jdk_home)
+assert_equals "$found_active_val" "$DISCOVERY_DIR/temurin-17-jdk" "find_compatible_jdk_home discovers active compatible java"
 
 JAVA_ONLY_BIN="$TEMP_DIR/java-only-bin"
 mkdir -p "$JAVA_ONLY_BIN" "$TEMP_DIR/fake-jre"
@@ -190,7 +265,7 @@ assert_equals "$noop_status" "2" "Unsupported SDK --fix exits before fixes"
 help_output=$("$SCRIPT" --help)
 version_output=$("$SCRIPT" --version)
 assert_contains "$help_output" "50, 51, 52, 53, 54, 55, 56, 57" "Help lists SDK 57"
-assert_equals "$version_output" "expo-local-doctor v1.3.4" "Version smoke test"
+assert_equals "$version_output" "expo-local-doctor v1.3.5" "Version smoke test"
 
 if [ "$FAIL" -gt 0 ]; then
     printf '%s test(s) failed; %s passed\n' "$FAIL" "$PASS" >&2

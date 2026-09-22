@@ -84,7 +84,7 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 ⚙️  EAS CLI
 ✅ eas is installed: /usr/bin/eas
 
-☕ Java JDK (OpenJDK 17+ required)
+☕ Java JDK (OpenJDK 17-21 required)
 ✅ Java is installed: version 17
 ✅ JAVA_HOME is set: /usr/lib/jvm/java-17-openjdk-amd64
 
@@ -147,7 +147,7 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 | **npm** | Always required |
 | **yarn / pnpm / bun** | Checked if detected as the project's package manager (via `packageManager` field or lock file) |
 | **EAS CLI** | Expo Application Services CLI |
-| **Java JDK** | OpenJDK 17+ with the `javac` compiler (a runtime-only Java installation does not pass) |
+| **Java JDK** | OpenJDK 17–21 with the `javac` compiler (Java 22+ causes Android Gradle Plugin / Prefab build errors; a runtime-only Java installation does not pass) |
 | **JAVA_HOME** | Environment variable pointing to JDK; `--fix` writes an idempotent block to the active Bash, Zsh, or Fish profile |
 | **Android SDK** | `ANDROID_HOME`, `cmdline-tools`, `platform-tools`, exact `build-tools`, platform, and NDK per SDK; literal Gradle `ndkVersion` overrides are honored, and incomplete versioned NDK installs are removed by `--fix` |
 | **adb in PATH** | Warns if `$ANDROID_HOME/platform-tools` is not on `$PATH` |

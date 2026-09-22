@@ -14,7 +14,7 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION="1.3.4"
+VERSION="1.3.5"
 SCRIPT_NAME="expo-local-doctor"
 
 # Android command-line tools download version (latest stable)
@@ -42,6 +42,7 @@ DEFAULT_SDK_VERSION=57
 # These will be set by resolve_sdk_versions()
 MIN_NODE_VERSION=""
 MIN_JDK_VERSION=""
+MAX_JDK_VERSION="21"
 ANDROID_PLATFORM_VERSION=""
 ANDROID_BUILD_TOOLS_VERSION=""
 ANDROID_NDK_VERSION=""
@@ -145,6 +146,7 @@ resolve_sdk_versions() {
         if [ "$entry_sdk" = "$sdk" ]; then
             MIN_NODE_VERSION="$min_node"
             MIN_JDK_VERSION="$min_jdk"
+            MAX_JDK_VERSION="21"
             ANDROID_PLATFORM_VERSION="android-${compile_sdk}"
             ANDROID_BUILD_TOOLS_VERSION="$build_tools"
             ANDROID_NDK_VERSION="$ndk"
@@ -408,7 +410,9 @@ check_eas() {
 }
 
 check_java() {
-    header "☕ Java JDK (OpenJDK $MIN_JDK_VERSION+ required)"
+    local min_jdk="${MIN_JDK_VERSION:-17}"
+    local max_jdk="${MAX_JDK_VERSION:-21}"
+    header "☕ Java JDK (OpenJDK $min_jdk-$max_jdk required)"
 
     if ! command -v java &>/dev/null; then
         fail "Java is not installed."
@@ -416,13 +420,21 @@ check_java() {
         ((CHECKS_FAILED++)) || true
     else
         local java_version
-        java_version=$(java -version 2>&1 | head -n1 | grep -oP '(?<=\")\d+' | head -1 || true)
-        if [ -n "$java_version" ] && [ "$java_version" -lt "$MIN_JDK_VERSION" ]; then
-            fail "Java $java_version is installed, but version ${MIN_JDK_VERSION}+ is required."
+        java_version=$(java -version 2>&1 | grep -E 'version "' | head -n1 | grep -oP '(?<=\")\d+' | head -1 || true)
+        if [ -z "$java_version" ]; then
+            fail "Unable to determine Java version."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        elif [ "$java_version" -lt "$min_jdk" ]; then
+            fail "Java $java_version is installed, but version ${min_jdk}-${max_jdk} is required."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        elif [ "$java_version" -gt "$max_jdk" ]; then
+            fail "Java $java_version is installed, but version ${min_jdk}-${max_jdk} is required (Java 22+ causes Android Gradle Plugin / Prefab build failures)."
             MISSING=1
             ((CHECKS_FAILED++)) || true
         else
-            ok "Java is installed: ${DIM}version ${java_version:-unknown}${RESET}"
+            ok "Java is installed: ${DIM}version ${java_version}${RESET}"
             ((CHECKS_PASSED++)) || true
         fi
     fi
@@ -432,10 +444,19 @@ check_java() {
         MISSING=1
         ((CHECKS_FAILED++)) || true
     else
-        local javac_version
-        javac_version=$(javac -version 2>&1 | grep -oP '\d+(?:\.\d+){0,2}' | head -1 || true)
-        if ! version_at_least "${javac_version:-0}" "$MIN_JDK_VERSION"; then
-            fail "Java compiler version ${javac_version:-unknown} is installed, but version ${MIN_JDK_VERSION}+ is required."
+        local javac_version javac_major
+        javac_version=$(javac -version 2>&1 | grep -i 'javac' | head -n1 | grep -oP '\d+(?:\.\d+){0,2}' | head -1 || true)
+        javac_major=$(echo "$javac_version" | cut -d. -f1)
+        if [ -z "$javac_major" ]; then
+            fail "Unable to determine Java compiler version."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        elif [ "$javac_major" -lt "$min_jdk" ]; then
+            fail "Java compiler version ${javac_version:-unknown} is installed, but version ${min_jdk}-${max_jdk} is required."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        elif [ "$javac_major" -gt "$max_jdk" ]; then
+            fail "Java compiler version ${javac_version:-unknown} is installed, but version ${min_jdk}-${max_jdk} is required."
             MISSING=1
             ((CHECKS_FAILED++)) || true
         else
@@ -445,10 +466,28 @@ check_java() {
     fi
 
     check_env_dir JAVA_HOME || true
-    if [ -n "${JAVA_HOME:-}" ] && [ -d "${JAVA_HOME:-}" ] && [ ! -x "$JAVA_HOME/bin/javac" ]; then
-        fail "JAVA_HOME points to '$JAVA_HOME', but it does not contain bin/javac."
-        MISSING=1
-        ((CHECKS_FAILED++)) || true
+    if [ -n "${JAVA_HOME:-}" ] && [ -d "${JAVA_HOME:-}" ]; then
+        if [ ! -x "$JAVA_HOME/bin/javac" ]; then
+            fail "JAVA_HOME points to '$JAVA_HOME', but it does not contain bin/javac."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        elif [ ! -x "$JAVA_HOME/bin/java" ]; then
+            fail "JAVA_HOME points to '$JAVA_HOME', but it does not contain bin/java."
+            MISSING=1
+            ((CHECKS_FAILED++)) || true
+        else
+            local home_java_ver
+            home_java_ver=$("$JAVA_HOME/bin/java" -version 2>&1 | grep -E 'version "' | head -n1 | grep -oP '(?<=")\d+' | head -1 || true)
+            if [ -z "$home_java_ver" ]; then
+                fail "JAVA_HOME points to '$JAVA_HOME', but unable to determine its Java version."
+                MISSING=1
+                ((CHECKS_FAILED++)) || true
+            elif [ "$home_java_ver" -lt "$min_jdk" ] || [ "$home_java_ver" -gt "$max_jdk" ]; then
+                fail "JAVA_HOME points to '$JAVA_HOME' (version $home_java_ver), but version ${min_jdk}-${max_jdk} is required."
+                MISSING=1
+                ((CHECKS_FAILED++)) || true
+            fi
+        fi
     fi
 }
 
@@ -825,62 +864,151 @@ configure_shell_profile() {
         if [ "$SHELL_PROFILE_TYPE" = "fish" ]; then
             printf 'set -gx JAVA_HOME "%s"\n' "$java_home"
             printf 'set -gx ANDROID_HOME "%s"\n' "$android_home"
-            printf 'fish_add_path -g "%s" "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools"\n' "$cmdline_tools_bin"
+            printf 'fish_add_path -g "$JAVA_HOME/bin" "%s" "$ANDROID_HOME/emulator" "$ANDROID_HOME/platform-tools"\n' "$cmdline_tools_bin"
         else
             printf 'export JAVA_HOME="%s"\n' "$java_home"
             printf 'export ANDROID_HOME="%s"\n' "$android_home"
-            printf 'export PATH="$PATH:$ANDROID_HOME/emulator:%s:$ANDROID_HOME/platform-tools"\n' "$cmdline_tools_bin"
+            printf 'export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/emulator:%s:$ANDROID_HOME/platform-tools"\n' "$cmdline_tools_bin"
         fi
         echo "# <<< expo-local-doctor <<<"
     } >> "$tmp_profile"
-    mv "$tmp_profile" "$SHELL_PROFILE"
+    cat "$tmp_profile" > "$SHELL_PROFILE"
+    rm -f "$tmp_profile"
     ok "Environment configuration updated in ${SHELL_PROFILE}."
 }
 
-fix_java() {
-    local needs_install=0 java_version="" target_jdk_version="$MIN_JDK_VERSION"
-    if ! command -v java &>/dev/null; then
-        needs_install=1
-    else
-        java_version=$(java -version 2>&1 | head -n1 | grep -oP '(?<=")\d+' | head -1 || true)
-        if [ -n "$java_version" ] && [ "$java_version" -lt "$MIN_JDK_VERSION" ]; then
-            info "Java $java_version is installed but version ${MIN_JDK_VERSION} is required. Installing..."
-            needs_install=1
-        else
-            [ -n "$java_version" ] && target_jdk_version="$java_version"
+# Locate a compatible JDK home (version between MIN_JDK_VERSION and MAX_JDK_VERSION).
+# Echoes directory path on success; returns non-zero if none found.
+find_compatible_jdk_home() {
+    local min_ver="${MIN_JDK_VERSION:-17}"
+    local max_ver="${MAX_JDK_VERSION:-21}"
+    local candidate ver
+
+    # 1. Check current JAVA_HOME if valid and compatible
+    if [ -n "${JAVA_HOME:-}" ] && [ -d "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/javac" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+        ver=$("$JAVA_HOME/bin/java" -version 2>&1 | grep -E 'version "' | head -n1 | grep -oP '(?<=")\d+' | head -1 || true)
+        if [ -n "$ver" ] && [ "$ver" -ge "$min_ver" ] && [ "$ver" -le "$max_ver" ]; then
+            echo "$JAVA_HOME"
+            return 0
         fi
     fi
 
-    if ! command -v javac &>/dev/null; then
-        info "Java compiler (javac) is missing. Installing the JDK development package..."
-        needs_install=1
+    # 2. Check active java binary if compatible and contains javac
+    if command -v java &>/dev/null; then
+        local active_java active_home
+        active_java=$(readlink -f "$(command -v java)" 2>/dev/null || true)
+        if [ -n "$active_java" ] && [ -x "$active_java" ]; then
+            active_home=$(dirname "$(dirname "$active_java")")
+            if [ -x "$active_home/bin/javac" ]; then
+                ver=$("$active_java" -version 2>&1 | grep -E 'version "' | head -n1 | grep -oP '(?<=")\d+' | head -1 || true)
+                if [ -n "$ver" ] && [ "$ver" -ge "$min_ver" ] && [ "$ver" -le "$max_ver" ]; then
+                    echo "$active_home"
+                    return 0
+                fi
+            fi
+        fi
+    fi
+
+    # 3. Check well-known Linux JDK directories
+    local search_dirs=(
+        /usr/lib/jvm/temurin-17*
+        /usr/lib/jvm/java-17-openjdk*
+        /usr/lib/jvm/temurin-21*
+        /usr/lib/jvm/java-21-openjdk*
+        /usr/lib/jvm/java-17*
+        /usr/lib/jvm/java-21*
+        /usr/lib64/jvm/java-17*
+        /usr/lib64/jvm/java-21*
+        "$HOME"/.sdkman/candidates/java/current
+        "$HOME"/.sdkman/candidates/java/17*
+        "$HOME"/.sdkman/candidates/java/21*
+        /opt/android-studio/jbr
+        /usr/local/android-studio/jbr
+        "$HOME"/android-studio/jbr
+        "$HOME"/.local/share/JetBrains/Toolbox/apps/android-studio/ch-0/*/jbr
+    )
+
+    for candidate in "${search_dirs[@]}"; do
+        [ -d "$candidate" ] || continue
+        if [ -x "$candidate/bin/javac" ] && [ -x "$candidate/bin/java" ]; then
+            ver=$("$candidate/bin/java" -version 2>&1 | grep -E 'version "' | head -n1 | grep -oP '(?<=")\d+' | head -1 || true)
+            if [ -n "$ver" ] && [ "$ver" -ge "$min_ver" ] && [ "$ver" -le "$max_ver" ]; then
+                echo "$candidate"
+                return 0
+            fi
+        fi
+    done
+
+    return 1
+}
+
+fix_java() {
+    local min_jdk="${MIN_JDK_VERSION:-17}"
+    local max_jdk="${MAX_JDK_VERSION:-21}"
+    local needs_install=0 java_version="" target_jdk_version="$min_jdk"
+
+    local existing_jdk
+    if existing_jdk=$(find_compatible_jdk_home); then
+        info "Found compatible JDK at: ${existing_jdk}"
+        needs_install=0
     else
-        local javac_version
-        javac_version=$(javac -version 2>&1 | grep -oP '\d+' | head -1 || true)
-        if ! version_at_least "${javac_version:-0}" "$MIN_JDK_VERSION"; then
-            info "Java compiler $javac_version is installed but version ${MIN_JDK_VERSION} is required. Installing..."
+        if ! command -v java &>/dev/null; then
+            info "Java is not installed. Installing OpenJDK ${target_jdk_version}..."
             needs_install=1
+        else
+            java_version=$(java -version 2>&1 | grep -E 'version "' | head -n1 | grep -oP '(?<=")\d+' | head -1 || true)
+            if [ -z "$java_version" ] || [ "$java_version" -lt "$min_jdk" ] || [ "$java_version" -gt "$max_jdk" ]; then
+                if [ -n "$java_version" ] && [ "$java_version" -gt "$max_jdk" ]; then
+                    info "Java $java_version is installed, but Android builds require JDK ${min_jdk}-${max_jdk}. Installing JDK ${target_jdk_version}..."
+                else
+                    info "Java ${java_version:-unknown} is installed but version ${min_jdk}-${max_jdk} is required. Installing JDK ${target_jdk_version}..."
+                fi
+                needs_install=1
+            fi
+        fi
+
+        if [ "$needs_install" -eq 0 ]; then
+            if ! command -v javac &>/dev/null; then
+                info "Java compiler (javac) is missing. Installing the JDK development package..."
+                needs_install=1
+            else
+                local javac_version javac_major
+                javac_version=$(javac -version 2>&1 | grep -i 'javac' | head -n1 | grep -oP '\d+' | head -1 || true)
+                javac_major=$(echo "$javac_version" | cut -d. -f1)
+                if [ -z "$javac_major" ] || [ "$javac_major" -lt "$min_jdk" ] || [ "$javac_major" -gt "$max_jdk" ]; then
+                    info "Java compiler ${javac_version:-unknown} is incompatible. Installing JDK ${target_jdk_version}..."
+                    needs_install=1
+                fi
+            fi
         fi
     fi
 
     if [ "$needs_install" -eq 1 ]; then
         header "☕ Installing OpenJDK ${target_jdk_version} development package..."
-        install_pkg "openjdk-${target_jdk_version}-jdk" "java-${target_jdk_version}-openjdk-devel" "jdk${target_jdk_version}-openjdk"
+        if [ "$PKG_MANAGER" = "dnf" ]; then
+            if dnf list available "java-${target_jdk_version}-openjdk-devel" &>/dev/null || dnf list installed "java-${target_jdk_version}-openjdk-devel" &>/dev/null; then
+                install_pkg "-" "java-${target_jdk_version}-openjdk-devel" "-"
+            else
+                info "Standard Fedora openjdk-${target_jdk_version} not found; installing via Adoptium Temurin repository..."
+                sudo dnf install -y adoptium-temurin-java-repository
+                sudo dnf install -y "temurin-${target_jdk_version}-jdk"
+            fi
+        else
+            install_pkg "openjdk-${target_jdk_version}-jdk" "java-${target_jdk_version}-openjdk-devel" "jdk${target_jdk_version}-openjdk"
+        fi
         ok "OpenJDK ${target_jdk_version} development package installed."
     fi
 
-    if ! command -v javac &>/dev/null; then
-        fail "javac is still unavailable after JDK installation."
+    local java_home_path
+    if java_home_path=$(find_compatible_jdk_home); then
+        RESOLVED_JAVA_HOME="$java_home_path"
+        export JAVA_HOME="$java_home_path"
+        export PATH="$java_home_path/bin:$PATH"
+        ok "JAVA_HOME resolved to ${java_home_path}"
+    else
+        fail "Unable to locate a compatible JDK (${min_jdk}-${max_jdk}) home directory."
         exit 1
     fi
-
-    # Resolve the JDK home from the active java binary
-    local java_home_path
-    java_home_path=$(dirname "$(dirname "$(readlink -f "$(command -v java)")")")
-
-    RESOLVED_JAVA_HOME="$java_home_path"
-    export JAVA_HOME="$java_home_path"
-    ok "JAVA_HOME resolved to ${java_home_path}"
 }
 
 # Locate the cmdline-tools bin directory that contains sdkmanager.

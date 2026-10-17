@@ -67,7 +67,7 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 🔍 expo-local-doctor v1.3.6 — Checking system readiness...
 ℹ  Detected: apt on x86_64
 ℹ  Expo SDK: 58 (from ./package.json)
-ℹ  Requirements: Node 22.13+ (22.x), 24.3+ (24.x), or even-numbered releases 26+, JDK 17, android-37, build-tools 37.0.0, NDK 27.1.12297006
+ℹ  Requirements: Node 22.13+ (22.x), 24.3+ (24.x), or even-numbered releases 26+, JDK 17, android-37.0, build-tools 37.0.0, NDK 27.1.12297006
 ────────────────────────────────────────────────────────
 
 📦 Basic Utilities & Build Tools
@@ -88,12 +88,12 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 ✅ Java is installed: version 17
 ✅ JAVA_HOME is set: /usr/lib/jvm/java-17-openjdk-amd64
 
-🤖 Android SDK (android-37, build-tools 37.0.0, NDK 27.1.12297006)
+🤖 Android SDK (android-37.0, build-tools 37.0.0, NDK 27.1.12297006)
 ✅ ANDROID_HOME is set: /home/user/Android/Sdk
 ✅ cmdline-tools directory found.
 ✅ platform-tools directory found.
 ✅ build-tools 37.0.0 found.
-✅ android-37 platform found.
+✅ android-37.0 platform found.
 ✅ NDK 27.1.12297006 found.
 
 👀 Watchman

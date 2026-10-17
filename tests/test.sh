@@ -35,7 +35,7 @@ version_at_least "24.0.0" "22.13.0" && test_pass "Node above SDK 57 minimum pass
 
 (
     resolve_sdk_versions 58
-    assert_equals "$ANDROID_PLATFORM_VERSION" "android-37" "SDK 58 requires platform 37"
+    assert_equals "$ANDROID_PLATFORM_VERSION" "android-37.0" "SDK 58 requires platform 37"
     assert_equals "$ANDROID_BUILD_TOOLS_VERSION" "37.0.0" "SDK 58 requires Build Tools 37"
     assert_equals "$ANDROID_NDK_VERSION" "27.1.12297006" "SDK 58 NDK default"
     for version in 22.13.0 22.20.0 24.3.0 26.0.0; do

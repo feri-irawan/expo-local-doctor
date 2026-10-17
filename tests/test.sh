@@ -272,6 +272,17 @@ clean_incomplete_ndk_dirs "$FAKE_ANDROID_HOME/ndk"
 [ ! -d "$FAKE_ANDROID_HOME/ndk/27.0.12077973" ] && test_pass "Fix removes only incomplete NDK directories" || test_fail "Fix removes only incomplete NDK directories"
 [ -d "$FAKE_ANDROID_HOME/ndk/backup" ] && test_pass "Fix preserves non-version NDK directories" || test_fail "Fix preserves non-version NDK directories"
 
+# Run with errexit outside command substitution: a complete NDK must not
+# terminate the CLI before Watchman, firewall, and the final summary.
+complete_ndk_output=$(bash -euo pipefail -c '
+    export EXPO_LOCAL_DOCTOR_NO_MAIN=1
+    source "$1"
+    result=$(list_incomplete_ndk_dirs "$2")
+    [ -z "$result" ]
+    printf "scan completed"
+' bash "$SCRIPT" "$FAKE_ANDROID_HOME/ndk")
+assert_equals "$complete_ndk_output" "scan completed" "Complete NDK scan succeeds with errexit and pipefail"
+
 FIREWALL_LOG="$TEMP_DIR/check-firewall.log"
 firewall_output=$(PATH="$FAKE_BIN:$PATH" FIREWALL_LOG="$FIREWALL_LOG" check_firewall)
 assert_contains "$firewall_output" "default zone 'work' allows port 8081/tcp" "Firewalld checks the active default zone"

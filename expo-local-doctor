@@ -533,6 +533,7 @@ list_incomplete_ndk_dirs() {
             name=$(basename "$candidate")
             [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -d "$candidate" ] && [ ! -f "$candidate/source.properties" ] && printf '%s\n' "$name"
         done
+        return 0
     ) | sort | awk 'NR == 1 { result = $0; next } { result = result ", " $0 } END { printf "%s", result }'
 }
 

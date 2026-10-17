@@ -31,6 +31,24 @@ version_at_least "22.13.0" "22.13.0" && test_pass "Node version exactly at SDK 5
 if version_at_least "22.0.0" "22.13.0"; then test_fail "Node below SDK 57 minimum fails"; else test_pass "Node below SDK 57 minimum fails"; fi
 version_at_least "24.0.0" "22.13.0" && test_pass "Node above SDK 57 minimum passes" || test_fail "Node above SDK 57 minimum passes"
 
+(
+    resolve_sdk_versions 58
+    assert_equals "$ANDROID_PLATFORM_VERSION" "android-37" "SDK 58 requires platform 37"
+    assert_equals "$ANDROID_BUILD_TOOLS_VERSION" "37.0.0" "SDK 58 requires Build Tools 37"
+    assert_equals "$ANDROID_NDK_VERSION" "27.1.12297006" "SDK 58 NDK default"
+    for version in 22.13.0 22.20.0 24.3.0 26.0.0; do
+        if node_version_supported "$version"; then test_pass "SDK 58 accepts Node $version"; else test_fail "SDK 58 accepts Node $version"; fi
+    done
+    for version in 20.19.0 22.12.9 23.0.0 24.2.9 25.0.0 27.0.0 22.13.0-rc.1 invalid; do
+        if node_version_supported "$version"; then test_fail "SDK 58 rejects Node $version"; else test_pass "SDK 58 rejects Node $version"; fi
+    done
+    mkdir -p "$TEMP_DIR/sdk58-project"
+    printf '{"dependencies":{"expo":"^58.0.0"}}\n' > "$TEMP_DIR/sdk58-project/package.json"
+    cd "$TEMP_DIR/sdk58-project"
+    detect_project
+    assert_equals "$DETECTED_SDK_VERSION" "58" "SDK 58 detected from package.json"
+)
+
 mkdir -p "$TEMP_DIR/sdk57-project"
 printf '{"dependencies":{"expo":"~57.0.23"}}\n' > "$TEMP_DIR/sdk57-project/package.json"
 (
@@ -52,25 +70,25 @@ mkdir -p "$TEMP_DIR/no-project"
     USER_SDK_OVERRIDE=""
     PROJECT_PKG_MANAGER=""
     detect_project
-    assert_equals "$DETECTED_SDK_VERSION" "57" "No-project fallback uses SDK 57"
+    assert_equals "$DETECTED_SDK_VERSION" "58" "No-project fallback uses SDK 58"
 )
 
 unset EXPO_LOCAL_DOCTOR_NO_MAIN
 set +e
-unknown_output=$("$SCRIPT" --sdk 58 2>&1)
+unknown_output=$("$SCRIPT" --sdk 999 2>&1)
 unknown_status=$?
 set -e
 assert_equals "$unknown_status" "2" "Unknown --sdk exits with code 2"
-assert_contains "$unknown_output" "Expo SDK 58 is not supported" "Unknown --sdk explains the failure"
+assert_contains "$unknown_output" "Expo SDK 999 is not supported" "Unknown --sdk explains the failure"
 
-mkdir -p "$TEMP_DIR/sdk58-project"
-printf '{"dependencies":{"expo":"^58.0.0"}}\n' > "$TEMP_DIR/sdk58-project/package.json"
+mkdir -p "$TEMP_DIR/sdk999-project"
+printf '{"dependencies":{"expo":"^999.0.0"}}\n' > "$TEMP_DIR/sdk999-project/package.json"
 set +e
-unknown_project_output=$(cd "$TEMP_DIR/sdk58-project" && "$SCRIPT" 2>&1)
+unknown_project_output=$(cd "$TEMP_DIR/sdk999-project" && "$SCRIPT" 2>&1)
 unknown_project_status=$?
 set -e
 assert_equals "$unknown_project_status" "2" "Unknown project SDK exits with code 2"
-assert_contains "$unknown_project_output" "found in $TEMP_DIR/sdk58-project/package.json" "Unknown project SDK identifies package.json source"
+assert_contains "$unknown_project_output" "found in $TEMP_DIR/sdk999-project/package.json" "Unknown project SDK identifies package.json source"
 
 for shell_name in bash zsh fish; do
     profile_home="$TEMP_DIR/home-$shell_name"
@@ -132,9 +150,28 @@ chmod +x "$FAKE_BIN/systemctl" "$FAKE_BIN/sudo" "$FAKE_BIN/firewall-cmd"
 chmod +x "$FAKE_BIN/node" "$FAKE_BIN/npm" "$FAKE_BIN/java" "$FAKE_BIN/javac" "$FAKE_BIN/adb"
 
 node_old_output=$(PATH="$FAKE_BIN:$PATH" NODE_FIXTURE="22.0.0" MIN_NODE_VERSION="22.13.0" DETECTED_SDK_VERSION="57" check_node)
-assert_contains "$node_old_output" "v22.13.0+ is required" "Node check rejects a version below the patch minimum"
+assert_contains "$node_old_output" "≥22.13.0 is required" "Node check rejects a version below the patch minimum"
 node_exact_output=$(PATH="$FAKE_BIN:$PATH" NODE_FIXTURE="22.13.0" MIN_NODE_VERSION="22.13.0" DETECTED_SDK_VERSION="57" check_node)
 assert_contains "$node_exact_output" "Node.js is installed: v22.13.0" "Node check accepts the exact minimum"
+
+(
+    resolve_sdk_versions 58
+    node_rejected_output=$(PATH="$FAKE_BIN:$PATH" NODE_FIXTURE="24.0.0" check_node)
+    assert_contains "$node_rejected_output" "24.3+ (24.x)" "SDK 58 Node check explains release-line requirements"
+    fix_home="$TEMP_DIR/node-fix-home"
+    mkdir -p "$fix_home/.nvm"
+    cat > "$fix_home/.nvm/nvm.sh" <<'NVM'
+nvm() {
+    printf '%s\n' "$*" >> "$NVM_TEST_LOG"
+    if [ "$1" = use ]; then export NODE_FIXTURE=22.20.0; fi
+}
+NVM
+    curl() { :; }
+    export NVM_TEST_LOG="$TEMP_DIR/nvm-calls"
+    HOME="$fix_home" PATH="$FAKE_BIN:$PATH" NODE_FIXTURE="25.0.0" fix_node
+    assert_contains "$(cat "$NVM_TEST_LOG")" "install 22" "Fix replaces unsupported Node with supported major"
+    assert_contains "$(cat "$NVM_TEST_LOG")" "alias default 22" "Fix persists supported Node major"
+)
 
 watchman_sdk57_output=$(PATH="$FAKE_BIN" DETECTED_SDK_VERSION="57" check_watchman)
 assert_contains "$watchman_sdk57_output" "not required for Expo SDK 56+" "Watchman is non-blocking for SDK 57"
@@ -256,7 +293,7 @@ NOOP_MARKER="$TEMP_DIR/unsupported-fix.marker"
 printf '%s\n' '#!/usr/bin/env bash' 'touch "$NOOP_MARKER"' > "$FAKE_BIN/dnf"
 chmod +x "$FAKE_BIN/dnf"
 set +e
-noop_output=$(PATH="$FAKE_BIN:$PATH" NOOP_MARKER="$NOOP_MARKER" "$SCRIPT" --fix --sdk 58 2>&1)
+noop_output=$(PATH="$FAKE_BIN:$PATH" NOOP_MARKER="$NOOP_MARKER" "$SCRIPT" --fix --sdk 999 2>&1)
 noop_status=$?
 set -e
 assert_equals "$noop_status" "2" "Unsupported SDK --fix exits before fixes"
@@ -264,8 +301,8 @@ assert_equals "$noop_status" "2" "Unsupported SDK --fix exits before fixes"
 
 help_output=$("$SCRIPT" --help)
 version_output=$("$SCRIPT" --version)
-assert_contains "$help_output" "50, 51, 52, 53, 54, 55, 56, 57" "Help lists SDK 57"
-assert_equals "$version_output" "expo-local-doctor v1.3.5" "Version smoke test"
+assert_contains "$help_output" "50, 51, 52, 53, 54, 55, 56, 57, 58" "Help lists SDK 58"
+assert_equals "$version_output" "expo-local-doctor v1.3.6" "Version smoke test"
 
 if [ "$FAIL" -gt 0 ]; then
     printf '%s test(s) failed; %s passed\n' "$FAIL" "$PASS" >&2

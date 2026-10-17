@@ -193,8 +193,30 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 Run the portable test harness before submitting a change:
 
 ```bash
-bash -n expo-local-doctor tests/test.sh
+for script in expo-local-doctor tests/*.sh; do bash -n "$script"; done
+shellcheck -S warning expo-local-doctor tests/*.sh
 bash tests/test.sh
+bash tests/compatibility.sh
+```
+
+GitHub Actions runs syntax checks, ShellCheck (warning/error level), the mocked
+fix tests, and SDK 50–58 detection checks on every push and pull request. The
+portable harness also runs on Fedora 44. A Node matrix checks SDK 58 against
+real Node 22.12, 22.13, 23, 24.0, 24.3, 25, and 26 binaries, including versions
+that must be rejected.
+
+The separate **Android SDK integration** workflow runs on pushes and pull requests
+that change `expo-local-doctor`, `tests/**`, or its workflow file. It can also run
+manually from **Actions → Android SDK integration → Run workflow**. It downloads SDK 58's platform, Build Tools, and NDK into a fresh
+temporary SDK directory, checks them, and repeats the Android fix to verify reuse. It then uninstalls the
+required platform and verifies that the Android fix installs it again.
+Installation logs are uploaded even if the job fails. This tests Android setup;
+it does not build an Expo app or run the full system-wide `--fix` command.
+To run the download test locally on a disposable Linux environment with JDK 17,
+`curl`, `wget`, and `unzip` installed:
+
+```bash
+bash tests/android-integration.sh
 ```
 
 1. Fork the repository

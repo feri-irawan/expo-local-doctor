@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+# Variables assigned here configure functions sourced from the doctor.
+# shellcheck disable=SC2034
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -7,11 +9,11 @@ SCRIPT="$ROOT_DIR/expo-local-doctor"
 TEMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
-PASS=0
-FAIL=0
-
-test_pass() { printf 'ok - %s\n' "$1"; PASS=$((PASS + 1)); }
-test_fail() { printf 'not ok - %s\n' "$1" >&2; FAIL=$((FAIL + 1)); }
+# A shared result file retains assertions run in subshells.
+RESULTS_FILE="$TEMP_DIR/assertions.log"
+: > "$RESULTS_FILE"
+test_pass() { printf 'ok - %s\n' "$1"; printf 'ok\n' >> "$RESULTS_FILE"; }
+test_fail() { printf 'not ok - %s\n' "$1" >&2; exit 1; }
 assert_contains() {
     local haystack="$1" needle="$2" label="$3"
     if [[ "$haystack" == *"$needle"* ]]; then test_pass "$label"; else test_fail "$label"; fi
@@ -315,8 +317,5 @@ version_output=$("$SCRIPT" --version)
 assert_contains "$help_output" "50, 51, 52, 53, 54, 55, 56, 57, 58" "Help lists SDK 58"
 assert_equals "$version_output" "expo-local-doctor v1.3.6" "Version smoke test"
 
-if [ "$FAIL" -gt 0 ]; then
-    printf '%s test(s) failed; %s passed\n' "$FAIL" "$PASS" >&2
-    exit 1
-fi
+PASS=$(wc -l < "$RESULTS_FILE")
 printf '%s test(s) passed\n' "$PASS"

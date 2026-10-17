@@ -270,6 +270,8 @@ detect_project_ndk_override() {
         [ -f "$file" ] || continue
         override=$(grep -oP "ndkVersion\\s*(?:=|\\s)\\s*['\"]\\K[0-9]+(?:\\.[0-9]+)+" "$file" | head -1 || true)
         if [ -n "$override" ]; then
+            # Reserved for callers sourcing this script.
+            # shellcheck disable=SC2034
             PROJECT_NDK_SOURCE="$file"
             if [ "$override" != "$SDK_NDK_VERSION" ]; then
                 warn "Project overrides Expo SDK NDK ${SDK_NDK_VERSION} with ${override} in $file."

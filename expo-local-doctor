@@ -14,18 +14,21 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION="1.3.5"
+VERSION="1.3.6"
 SCRIPT_NAME="expo-local-doctor"
 
 # Android command-line tools download version (latest stable)
-ANDROID_CMDLINE_TOOLS_VERSION="11076708"
+ANDROID_CMDLINE_TOOLS_VERSION="16111833"
 
 # ---------------------------------------------------------------------------
 # Expo SDK → Dependency version mapping table
 # Format: sdk_version|min_node|min_jdk|compile_sdk|build_tools|ndk
 # Source: https://docs.expo.dev/versions/latest/
 # ---------------------------------------------------------------------------
+# SDK 58 Android defaults: expo/expo sdk-58, ExpoRootProjectPlugin.kt
+# Node support: https://expo.dev/changelog/sdk-58#tool-version-bumps
 SDK_VERSION_MAP=(
+    "58|22.13.0|17|37.0|37.0.0|27.1.12297006"
     "57|22.13.0|17|36|36.0.0|27.1.12297006"
     "56|20.19.0|17|36|36.0.0|27.1.12297006"
     "55|20.19.4|17|36|36.0.0|27.1.12297006"
@@ -37,7 +40,7 @@ SDK_VERSION_MAP=(
 )
 
 # Default fallback (latest known SDK)
-DEFAULT_SDK_VERSION=57
+DEFAULT_SDK_VERSION=58
 
 # These will be set by resolve_sdk_versions()
 MIN_NODE_VERSION=""
@@ -76,6 +79,30 @@ version_at_least() {
         fi
     done
     return 0
+}
+
+# SDK 58 tooling supports specific Node release lines, not a single floor.
+node_version_supported() {
+    local version="${1#v}" major
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    if [ "${DETECTED_SDK_VERSION:-0}" -lt 58 ]; then
+        version_at_least "$version" "$MIN_NODE_VERSION"
+        return
+    fi
+    major="${version%%.*}"
+    case "$major" in
+        22) version_at_least "$version" "22.13.0" ;;
+        24) version_at_least "$version" "24.3.0" ;;
+        *) [ "$major" -ge 26 ] && [ "$((major % 2))" -eq 0 ] ;;
+    esac
+}
+
+node_requirement() {
+    if [ "${DETECTED_SDK_VERSION:-0}" -ge 58 ]; then
+        printf '%s' '22.13+ (22.x), 24.3+ (24.x), or even-numbered releases 26+'
+    else
+        printf '≥%s' "$MIN_NODE_VERSION"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -243,6 +270,8 @@ detect_project_ndk_override() {
         [ -f "$file" ] || continue
         override=$(grep -oP "ndkVersion\\s*(?:=|\\s)\\s*['\"]\\K[0-9]+(?:\\.[0-9]+)+" "$file" | head -1 || true)
         if [ -n "$override" ]; then
+            # Reserved for callers sourcing this script.
+            # shellcheck disable=SC2034
             PROJECT_NDK_SOURCE="$file"
             if [ "$override" != "$SDK_NDK_VERSION" ]; then
                 warn "Project overrides Expo SDK NDK ${SDK_NDK_VERSION} with ${override} in $file."
@@ -377,8 +406,8 @@ check_node() {
     else
         local node_version
         node_version=$(node -v | sed 's/^v//')
-        if ! version_at_least "$node_version" "$MIN_NODE_VERSION"; then
-            fail "Node.js v$node_version is installed, but v${MIN_NODE_VERSION}+ is required for Expo SDK ${DETECTED_SDK_VERSION}."
+        if ! node_version_supported "$node_version"; then
+            fail "Node.js v$node_version is installed, but $(node_requirement) is required for Expo SDK ${DETECTED_SDK_VERSION}."
             MISSING=1
             ((CHECKS_FAILED++)) || true
         else
@@ -506,6 +535,7 @@ list_incomplete_ndk_dirs() {
             name=$(basename "$candidate")
             [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && [ -d "$candidate" ] && [ ! -f "$candidate/source.properties" ] && printf '%s\n' "$name"
         done
+        return 0
     ) | sort | awk 'NR == 1 { result = $0; next } { result = result ", " $0 } END { printf "%s", result }'
 }
 
@@ -755,7 +785,7 @@ fix_node() {
     if command -v node &>/dev/null; then
         local node_version
         node_version=$(node -v | sed 's/^v//')
-        if version_at_least "$node_version" "$MIN_NODE_VERSION"; then
+        if node_version_supported "$node_version"; then
             ok "Node.js $(node -v) is already installed."
             return
         fi
@@ -769,9 +799,15 @@ fix_node() {
     # shellcheck source=/dev/null
     [ -s "$NVM_DIR/nvm.sh" ] && source "$NVM_DIR/nvm.sh"
 
-    nvm install "$MIN_NODE_VERSION"
-    nvm use "$MIN_NODE_VERSION"
-    nvm alias default "$MIN_NODE_VERSION"
+    # Install the latest patch in the minimum supported major release line.
+    local node_target="${MIN_NODE_VERSION%%.*}"
+    nvm install "$node_target"
+    nvm use "$node_target"
+    nvm alias default "$node_target"
+    if ! node_version_supported "$(node -v)"; then
+        fail "Installed Node.js does not meet Expo SDK ${DETECTED_SDK_VERSION} requirements: $(node_requirement)."
+        return 1
+    fi
 
     ok "Node.js $(node -v) installed via NVM."
 }
@@ -1267,7 +1303,7 @@ ${BOLD}WHAT GETS CHECKED${RESET}
     • Firewall           UFW / Firewalld status & Metro port 8081 accessibility
 
 ${BOLD}SUPPORTED SDKs${RESET}
-    50, 51, 52, 53, 54, 55, 56, 57
+    50, 51, 52, 53, 54, 55, 56, 57, 58
 
 ${BOLD}SUPPORTED DISTROS${RESET}
     • Debian / Ubuntu        (apt)
@@ -1279,13 +1315,13 @@ ${BOLD}EXAMPLES${RESET}
     ./expo-local-doctor
 
     # Check for a specific Expo SDK version
-    ./expo-local-doctor --sdk 57
+    ./expo-local-doctor --sdk 58
 
     # Auto-fix everything
     ./expo-local-doctor --fix
 
     # Auto-fix for a specific SDK version
-    ./expo-local-doctor --fix --sdk 57
+    ./expo-local-doctor --fix --sdk 58
 
     # Pipe-safe (colors auto-disabled)
     ./expo-local-doctor 2>&1 | tee doctor-report.txt
@@ -1359,7 +1395,7 @@ main() {
         echo -e "${BOLD}${CYAN}🛠️  $SCRIPT_NAME v$VERSION — Fix Mode${RESET}"
         info "Detected: ${BOLD}$PKG_MANAGER${RESET} on ${BOLD}$ARCH${RESET}"
         info "Expo SDK: ${BOLD}$DETECTED_SDK_VERSION${RESET} ${DIM}($SDK_SOURCE)${RESET}"
-        info "Requirements: ${BOLD}Node ≥${MIN_NODE_VERSION}, JDK ${MIN_JDK_VERSION}, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}, NDK ${ANDROID_NDK_VERSION}${RESET}"
+        info "Requirements: ${BOLD}Node $(node_requirement), JDK ${MIN_JDK_VERSION}, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}, NDK ${ANDROID_NDK_VERSION}${RESET}"
         [ -n "$PROJECT_PKG_MANAGER" ] && info "Package manager: ${BOLD}$PROJECT_PKG_MANAGER${RESET} ${DIM}(detected from project)${RESET}"
         divider
 
@@ -1385,7 +1421,7 @@ main() {
         echo -e "${BOLD}${CYAN}🔍 $SCRIPT_NAME v$VERSION — Checking system readiness...${RESET}"
         info "Detected: ${BOLD}$PKG_MANAGER${RESET} on ${BOLD}$ARCH${RESET}"
         info "Expo SDK: ${BOLD}$DETECTED_SDK_VERSION${RESET} ${DIM}($SDK_SOURCE)${RESET}"
-        info "Requirements: ${BOLD}Node ≥${MIN_NODE_VERSION}, JDK ${MIN_JDK_VERSION}, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}, NDK ${ANDROID_NDK_VERSION}${RESET}"
+        info "Requirements: ${BOLD}Node $(node_requirement), JDK ${MIN_JDK_VERSION}, ${ANDROID_PLATFORM_VERSION}, build-tools ${ANDROID_BUILD_TOOLS_VERSION}, NDK ${ANDROID_NDK_VERSION}${RESET}"
         [ -n "$PROJECT_PKG_MANAGER" ] && info "Package manager: ${BOLD}$PROJECT_PKG_MANAGER${RESET} ${DIM}(detected from project)${RESET}"
         divider
 

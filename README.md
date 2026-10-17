@@ -14,7 +14,7 @@ Setting up a local Expo build environment on Linux can be tedious — you need N
 
 - 🔍 **One-command diagnostics** — instantly see what's missing or misconfigured
 - 🛠️ **Auto-fix mode** — install all missing dependencies with `--fix`
-- 🎯 **SDK-aware** — auto-detects Expo SDK 50–57 from `package.json` and checks the correct requirements
+- 🎯 **SDK-aware** — auto-detects Expo SDK 50–58 from `package.json` and checks the correct requirements
 - 📦 **PM-aware** — detects your project's package manager (yarn, pnpm, bun) and checks it's installed
 - 🛡️ **Firewall-aware** — checks UFW / Firewalld status and ensures port 8081 (Metro) is open for physical devices
 - 🐧 **Multi-distro support** — works on Debian/Ubuntu, Fedora/RHEL, and Arch Linux
@@ -64,10 +64,10 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 
 **Example output:**
 ```
-🔍 expo-local-doctor v1.3.4 — Checking system readiness...
+🔍 expo-local-doctor v1.3.6 — Checking system readiness...
 ℹ  Detected: apt on x86_64
-ℹ  Expo SDK: 57 (from ./package.json)
-ℹ  Requirements: Node ≥22.13.0, JDK 17, android-36, build-tools 36.0.0, NDK 27.1.12297006
+ℹ  Expo SDK: 58 (from ./package.json)
+ℹ  Requirements: Node 22.13+ (22.x), 24.3+ (24.x), or even-numbered releases 26+, JDK 17, android-37.0, build-tools 37.0.0, NDK 27.1.12297006
 ────────────────────────────────────────────────────────
 
 📦 Basic Utilities & Build Tools
@@ -88,12 +88,12 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 ✅ Java is installed: version 17
 ✅ JAVA_HOME is set: /usr/lib/jvm/java-17-openjdk-amd64
 
-🤖 Android SDK (android-36, build-tools 36.0.0, NDK 27.1.12297006)
+🤖 Android SDK (android-37.0, build-tools 37.0.0, NDK 27.1.12297006)
 ✅ ANDROID_HOME is set: /home/user/Android/Sdk
 ✅ cmdline-tools directory found.
 ✅ platform-tools directory found.
-✅ build-tools 36.0.0 found.
-✅ android-36 platform found.
+✅ build-tools 37.0.0 found.
+✅ android-37.0 platform found.
 ✅ NDK 27.1.12297006 found.
 
 👀 Watchman
@@ -122,11 +122,11 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 ### Target a specific SDK version
 
 ```bash
-# Check against SDK 57 requirements (even without a project)
-./expo-local-doctor --sdk 57
+# Check against SDK 58 requirements (even without a project)
+./expo-local-doctor --sdk 58
 
 # Auto-fix for a specific SDK
-./expo-local-doctor --fix --sdk 57
+./expo-local-doctor --fix --sdk 58
 ```
 
 ### Other options
@@ -143,7 +143,7 @@ Run inside your Expo project directory — it auto-detects the SDK version:
 | Component | Details |
 |---|---|
 | **Basic Utilities** | `curl`, `git`, `unzip`, `wget`, `gcc`, `make` |
-| **Node.js** | Exact minimum version per Expo SDK (e.g., ≥22.13.0 for SDK 57) |
+| **Node.js** | SDK-specific versions; SDK 58: Node 22.13+ on 22.x, 24.3+ on 24.x, or even-numbered releases 26+ |
 | **npm** | Always required |
 | **yarn / pnpm / bun** | Checked if detected as the project's package manager (via `packageManager` field or lock file) |
 | **EAS CLI** | Expo Application Services CLI |
@@ -193,8 +193,30 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 Run the portable test harness before submitting a change:
 
 ```bash
-bash -n expo-local-doctor tests/test.sh
+for script in expo-local-doctor tests/*.sh; do bash -n "$script"; done
+shellcheck -S warning expo-local-doctor tests/*.sh
 bash tests/test.sh
+bash tests/compatibility.sh
+```
+
+GitHub Actions runs syntax checks, ShellCheck (warning/error level), the mocked
+fix tests, and SDK 50–58 detection checks on every push and pull request. The
+portable harness also runs on Fedora 44. A Node matrix checks SDK 58 against
+real Node 22.12, 22.13, 23, 24.0, 24.3, 25, and 26 binaries, including versions
+that must be rejected.
+
+The separate **Android SDK integration** workflow runs on pushes and pull requests
+that change `expo-local-doctor`, `tests/**`, or its workflow file. It can also run
+manually from **Actions → Android SDK integration → Run workflow**. It downloads SDK 58's platform, Build Tools, and NDK into a fresh
+temporary SDK directory, checks them, and repeats the Android fix to verify reuse. It then uninstalls the
+required platform and verifies that the Android fix installs it again.
+Installation logs are uploaded even if the job fails. This tests Android setup;
+it does not build an Expo app or run the full system-wide `--fix` command.
+To run the download test locally on a disposable Linux environment with JDK 17,
+`curl`, `wget`, and `unzip` installed:
+
+```bash
+bash tests/android-integration.sh
 ```
 
 1. Fork the repository

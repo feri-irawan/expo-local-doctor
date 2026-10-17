@@ -3,19 +3,57 @@ name: Test
 on:
   push:
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   shell:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - name: Validate shell syntax
-        run: bash -n expo-local-doctor tests/test.sh
+        run: |
+          for script in expo-local-doctor tests/*.sh; do
+            bash -n "$script"
+          done
+      - name: ShellCheck
+        run: shellcheck -S warning expo-local-doctor tests/*.sh
       - name: Run portable test harness
         run: bash tests/test.sh
+      - name: Check all supported SDK versions
+        run: bash tests/compatibility.sh
+
+  node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {node: '22.12.0', expected: unsupported}
+          - {node: '22.13.0', expected: supported}
+          - {node: '23.0.0', expected: unsupported}
+          - {node: '24.0.0', expected: unsupported}
+          - {node: '24.3.0', expected: supported}
+          - {node: '25.0.0', expected: unsupported}
+          - {node: '26.0.0', expected: supported}
+    name: Node ${{ matrix.node }} (${{ matrix.expected }})
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Check SDK detection and real Node compatibility
+        env:
+          EXPECTED: ${{ matrix.expected }}
+        run: bash tests/compatibility.sh "$EXPECTED"
 
   fedora:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Run harness in Fedora
@@ -23,5 +61,5 @@ jobs:
           docker run --rm \
             --volume "$GITHUB_WORKSPACE:/workspace:ro" \
             --workdir /workspace \
-            fedora:latest \
-            bash -lc 'dnf -y install bash coreutils findutils gawk grep sed && bash -n expo-local-doctor tests/test.sh && bash tests/test.sh'
+            registry.fedoraproject.org/fedora:44 \
+            bash -lc 'set -e; dnf -y install bash coreutils findutils gawk grep sed; for script in expo-local-doctor tests/*.sh; do bash -n "$script"; done; bash tests/test.sh; bash tests/compatibility.sh'
